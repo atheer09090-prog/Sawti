@@ -1,48 +1,35 @@
-import whisper
-import tempfile
 import os
 import re
+import tempfile
 from typing import Optional
-
-# تحميل النموذج مرة واحدة عند بدء التشغيل
-_model = None
-
-def get_model():
-    global _model
-    if _model is None:
-        model_size = os.getenv("WHISPER_MODEL", "base")
-        _model = whisper.load_model(model_size)
-    return _model
-
+from groq import Groq
 
 def transcribe_arabic_audio(audio_bytes: bytes, audio_format: str = "wav") -> str:
     """
-    تحويل الصوت العربي إلى نص باستخدام Whisper
+    تحويل الصوت العربي إلى نص باستخدام Groq Whisper API
     """
+    client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+
     with tempfile.NamedTemporaryFile(suffix=f".{audio_format}", delete=False) as tmp:
         tmp.write(audio_bytes)
         tmp_path = tmp.name
 
     try:
-        model = get_model()
-        result = model.transcribe(
-            tmp_path,
-            language="ar",
-            task="transcribe",
-            fp16=False,
-        )
-        return result["text"].strip()
+        with open(tmp_path, "rb") as audio_file:
+            transcription = client.audio.transcriptions.create(
+                file=(f"recording.{audio_format}", audio_file.read()),
+                model="whisper-large-v3",
+                language="ar",
+                response_format="text",
+            )
+        return transcription.strip() if isinstance(transcription, str) else transcription.text.strip()
     finally:
         os.unlink(tmp_path)
 
 
 def evaluate_speaking(transcript: str, reference_text: Optional[str] = None) -> dict:
     """
-    تقييم جودة التحدث على 4 محاور:
-    1. النطق الصحيح للكلمات
-    2. بناء الجمل وتركيبها
-    3. التشكيل الصحيح للكلمات
-    4. صحة الجمل من حيث الإعراب
+    تقييم جودة التحدث على 4 محاور
     """
     if not transcript or len(transcript.strip()) < 5:
         return {
@@ -87,9 +74,7 @@ def _evaluate_pronunciation(transcript: str, reference: Optional[str]) -> int:
     if not reference:
         arabic_chars = len(re.findall(r'[\u0600-\u06FF]', transcript))
         total_chars = max(len(transcript.replace(" ", "")), 1)
-        arabic_ratio = arabic_chars / total_chars
-        return min(100, int(arabic_ratio * 100))
-
+        return min(100, int((arabic_chars / total_chars) * 100))
     ref_words = set(reference.split())
     trans_words = set(transcript.split())
     if not ref_words:
@@ -104,14 +89,11 @@ def _evaluate_sentence_structure(transcript: str, word_count: int) -> int:
         score += 20
     elif word_count >= 10:
         score += 10
-
-    connectors = ['ثم', 'ألن', 'لذلك', 'أما', 'بينما', 'حيث', 'كما', 'أيضاً', 'و', 'لكن']
+    connectors = ['ثم', 'لأن', 'لذلك', 'أما', 'بينما', 'حيث', 'كما', 'أيضاً', 'و', 'لكن']
     found = sum(1 for c in connectors if c in transcript)
     score += min(20, found * 5)
-
     if '.' in transcript or '،' in transcript:
         score += 10
-
     return min(100, score)
 
 
@@ -120,8 +102,7 @@ def _evaluate_diacritics(transcript: str) -> int:
     diacritics = len(re.findall(r'[\u064B-\u065F]', transcript))
     if total_chars == 0:
         return 50
-    ratio = diacritics / total_chars
-    return min(100, int(ratio * 200))
+    return min(100, int((diacritics / total_chars) * 200))
 
 
 def _evaluate_grammar(transcript: str) -> int:
@@ -129,14 +110,10 @@ def _evaluate_grammar(transcript: str) -> int:
     verb_patterns = ['يعمل', 'يذهب', 'يقول', 'يكتب', 'يقرأ', 'كان', 'أصبح']
     if any(v in transcript for v in verb_patterns):
         score += 15
-
     al_count = len(re.findall(r'\bال\w+', transcript))
     score += min(15, al_count * 3)
-
     common_errors = ['هاذا', 'هاذه', 'ذالك']
-    errors_found = sum(1 for e in common_errors if e in transcript)
-    score -= errors_found * 5
-
+    score -= sum(1 for e in common_errors if e in transcript) * 5
     return max(0, min(100, score))
 
 
