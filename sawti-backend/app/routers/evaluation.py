@@ -2,6 +2,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException
 from pydantic import BaseModel
 from app.services.speech_eval import transcribe_arabic_audio, evaluate_speaking
 from app.services.writing_eval import evaluate_writing
+from app.services.diacritize import diacritize_text
 
 router = APIRouter()
 
@@ -13,6 +14,20 @@ class WritingEvalRequest(BaseModel):
     min_words: int = 20
 
 
+class DiacritizeRequest(BaseModel):
+    text: str
+
+
+@router.post("/diacritize")
+def diacritize_endpoint(request: DiacritizeRequest):
+    """إضافة التشكيل وعلامات الترقيم للنص العربي"""
+    try:
+        result = diacritize_text(request.text)
+        return {"result": result}
+    except Exception as e:
+        raise HTTPException(500, f"خطأ في التشكيل: {str(e)}")
+
+
 @router.post("/speech")
 async def evaluate_speech_endpoint(
     student_id: int = 0,
@@ -20,11 +35,6 @@ async def evaluate_speech_endpoint(
     reference_text: str = "",
     audio_file: UploadFile = File(...),
 ):
-    """
-    تقييم التحدث: رفع ملف صوتي والحصول على التقييم
-    - **audio_file**: ملف صوتي (wav/mp3/webm)
-    - **reference_text**: النص المرجعي للمقارنة (اختياري)
-    """
     allowed_types = ["audio/wav", "audio/mp3", "audio/webm", "audio/mpeg", "audio/ogg"]
     if audio_file.content_type not in allowed_types:
         raise HTTPException(400, "صيغة الملف غير مدعومة")
@@ -45,9 +55,6 @@ async def evaluate_speech_endpoint(
 
 @router.post("/writing")
 def evaluate_writing_endpoint(request: WritingEvalRequest):
-    """
-    تقييم الكتابة: إرسال النص والحصول على التقييم
-    """
     try:
         result = evaluate_writing(request.text, request.min_words)
         result["student_id"] = request.student_id
