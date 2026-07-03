@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from app.services.speech_eval import transcribe_arabic_audio, evaluate_speaking
 from app.services.writing_eval import evaluate_writing
 from app.services.diacritize import diacritize_text
+from app.services.context_eval import evaluate_context
 
 router = APIRouter()
 
@@ -51,6 +52,16 @@ async def evaluate_speech_endpoint(
         return result
     except Exception as e:
         raise HTTPException(500, f"خطأ في معالجة الصوت: {str(e)}")
+
+
+@router.post("/context")
+def context_eval_endpoint(request: DiacritizeRequest):
+    """تقييم سياق الجمل واقتراح تحسينات أسلوبية"""
+    try:
+        suggestions = evaluate_context(request.text)
+        return {"suggestions": suggestions}
+    except Exception as e:
+        raise HTTPException(500, f"خطأ في تقييم السياق: {str(e)}")
 
 
 @router.post("/writing")
