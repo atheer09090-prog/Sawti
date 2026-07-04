@@ -282,3 +282,141 @@ def delete_fill_in(idx: int):
     data["fill_in"].pop(idx)
     _write_sl(data)
     return {"ok": True}
+
+
+# ── Writing Games ──
+
+GAMES_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "writing_games.json")
+
+DEFAULT_GAMES = {
+    "middle_hamza": [
+        {"before": "س", "after": "ال", "correct": "ؤ", "opts": ["ؤ","ئ","أ","ء"], "hint": "الهمزة على واو لأن ما قبلها ضمة", "word": "سؤال", "emoji": "❔"},
+        {"before": "يَس", "after": "ل", "correct": "أ", "opts": ["أ","ئ","ؤ","ء"], "hint": "الهمزة على ألف لأن ما قبلها ساكن وما بعدها مفتوح", "word": "يسأل", "emoji": "🗣️"},
+        {"before": "رَ", "after": "س", "correct": "أ", "opts": ["أ","ئ","ؤ","ء"], "hint": "الهمزة على ألف لأن ما قبلها فتحة", "word": "رأس", "emoji": "🧠"},
+        {"before": "بِ", "after": "ر", "correct": "ئ", "opts": ["ئ","ؤ","أ","ء"], "hint": "الهمزة على نبرة لأن ما قبلها كسرة", "word": "بئر", "emoji": "💧"},
+        {"before": "فُ", "after": "اد", "correct": "ؤ", "opts": ["ؤ","ئ","أ","ء"], "hint": "الهمزة على واو لأن ما قبلها ضمة", "word": "فؤاد", "emoji": "❤️"},
+    ],
+    "end_hamza": [
+        {"word": "سماء", "type": "ء", "rule": "ما قبلها ألف مد", "emoji": "☁️"},
+        {"word": "شيء", "type": "ء", "rule": "ما قبلها ياء ساكنة", "emoji": "📦"},
+        {"word": "مبدأ", "type": "أ", "rule": "ما قبلها فتحة", "emoji": "🎯"},
+        {"word": "امرؤ", "type": "ؤ", "rule": "ما قبلها ضمة", "emoji": "🧍"},
+    ],
+    "quick_quiz": [
+        {"q": "أيّ كتابة صحيحة؟", "opts": ["سؤال","سئال","سأال","سوال"], "correct": "سؤال", "explain": "الهمزة المتوسطة على واو لأن ما قبلها ضمة", "emoji": "❔"},
+        {"q": "أيّ كتابة صحيحة؟", "opts": ["شيء","شئ","شيأ","شيؤ"], "correct": "شيء", "explain": "الهمزة المتطرفة على السطر لأن ما قبلها ياء ساكنة", "emoji": "📦"},
+        {"q": "أيّ كتابة صحيحة؟", "opts": ["رأس","رءس","رؤس","رئس"], "correct": "رأس", "explain": "الهمزة المتوسطة على ألف لأن ما قبلها فتحة", "emoji": "🧠"},
+    ],
+}
+
+
+def _read_games() -> dict:
+    os.makedirs(os.path.dirname(GAMES_FILE), exist_ok=True)
+    if not os.path.exists(GAMES_FILE):
+        _write_games(DEFAULT_GAMES)
+        return DEFAULT_GAMES
+    with open(GAMES_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_games(data: dict):
+    os.makedirs(os.path.dirname(GAMES_FILE), exist_ok=True)
+    with open(GAMES_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+class MiddleHamzaQ(BaseModel):
+    before: str
+    after: str
+    correct: str
+    opts: List[str]
+    hint: str
+    word: str
+    emoji: str = "✨"
+
+class EndHamzaQ(BaseModel):
+    word: str
+    type: str
+    rule: str
+    emoji: str = "✨"
+
+class QuickQuizQ(BaseModel):
+    q: str
+    opts: List[str]
+    correct: str
+    explain: str
+    emoji: str = "✨"
+
+
+@router.get("/games")
+def get_games():
+    return _read_games()
+
+# Middle Hamza
+@router.post("/games/middle-hamza")
+def add_middle_hamza(q: MiddleHamzaQ):
+    data = _read_games()
+    data["middle_hamza"].append(q.dict())
+    _write_games(data)
+    return {"ok": True}
+
+@router.put("/games/middle-hamza/{idx}")
+def update_middle_hamza(idx: int, q: MiddleHamzaQ):
+    data = _read_games()
+    if idx >= len(data["middle_hamza"]): raise HTTPException(404, "غير موجود")
+    data["middle_hamza"][idx] = q.dict()
+    _write_games(data)
+    return {"ok": True}
+
+@router.delete("/games/middle-hamza/{idx}")
+def delete_middle_hamza(idx: int):
+    data = _read_games()
+    data["middle_hamza"].pop(idx)
+    _write_games(data)
+    return {"ok": True}
+
+# End Hamza
+@router.post("/games/end-hamza")
+def add_end_hamza(q: EndHamzaQ):
+    data = _read_games()
+    data["end_hamza"].append(q.dict())
+    _write_games(data)
+    return {"ok": True}
+
+@router.put("/games/end-hamza/{idx}")
+def update_end_hamza(idx: int, q: EndHamzaQ):
+    data = _read_games()
+    if idx >= len(data["end_hamza"]): raise HTTPException(404, "غير موجود")
+    data["end_hamza"][idx] = q.dict()
+    _write_games(data)
+    return {"ok": True}
+
+@router.delete("/games/end-hamza/{idx}")
+def delete_end_hamza(idx: int):
+    data = _read_games()
+    data["end_hamza"].pop(idx)
+    _write_games(data)
+    return {"ok": True}
+
+# Quick Quiz
+@router.post("/games/quick-quiz")
+def add_quick_quiz(q: QuickQuizQ):
+    data = _read_games()
+    data["quick_quiz"].append(q.dict())
+    _write_games(data)
+    return {"ok": True}
+
+@router.put("/games/quick-quiz/{idx}")
+def update_quick_quiz(idx: int, q: QuickQuizQ):
+    data = _read_games()
+    if idx >= len(data["quick_quiz"]): raise HTTPException(404, "غير موجود")
+    data["quick_quiz"][idx] = q.dict()
+    _write_games(data)
+    return {"ok": True}
+
+@router.delete("/games/quick-quiz/{idx}")
+def delete_quick_quiz(idx: int):
+    data = _read_games()
+    data["quick_quiz"].pop(idx)
+    _write_games(data)
+    return {"ok": True}
