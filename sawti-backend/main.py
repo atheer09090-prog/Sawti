@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import evaluation, reports
+from app.routers import evaluation, reports, lessons
 import os
 
 app = FastAPI(
@@ -10,20 +10,19 @@ app = FastAPI(
     docs_url="/api/docs",
 )
 
-# السماح بالطلبات من Frontend
 origins = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # في الإنتاج غيّرها لرابط منصتك
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# تسجيل المسارات
 app.include_router(evaluation.router, prefix="/api/eval", tags=["التقييم"])
 app.include_router(reports.router, prefix="/api/reports", tags=["التقارير"])
+app.include_router(lessons.router, prefix="/api/lessons", tags=["الدروس"])
 
 
 @app.get("/api/health")
