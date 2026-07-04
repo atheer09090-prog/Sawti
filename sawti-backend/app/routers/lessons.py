@@ -156,3 +156,129 @@ def delete_writing_topic(topic_id: str):
     data["writing"] = [t for t in data["writing"] if t["id"] != topic_id]
     _write(data)
     return {"ok": True}
+
+
+# ── Self Learning Questions ──
+
+DEFAULT_SELF_LEARNING = {
+    "quiz": [
+        {"q": "مَا ضِدُّ كَلِمَةِ «حَزِينٌ»؟", "options": ["غَاضِبٌ", "سَعِيدٌ", "خَائِفٌ", "مُتْعَبٌ"], "correct": 1},
+        {"q": "أَيُّ الْجُمَلِ صَحِيحَةٌ؟", "options": ["ذَهَبَ الطَّالِبُ إِلَى الْمَدْرَسَةِ", "الطَّالِبُ ذَهَبَ مَدْرَسَةٍ", "ذَهَبَتْ مَدْرَسَةٌ الطَّالِبُ", "إِلَى ذَهَبَ مَدْرَسَةٍ"], "correct": 0},
+        {"q": "مَا مُفْرَدُ «كُتُبٌ»؟", "options": ["كُتَيِّبٌ", "كِتَابٌ", "كَاتِبٌ", "مَكْتُوبٌ"], "correct": 1},
+    ],
+    "word_order": [
+        {"words": ["إِلَى", "ذَهَبَ", "الْمَدْرَسَةِ", "الطَّالِبُ"], "answer": "الطَّالِبُ ذَهَبَ إِلَى الْمَدْرَسَةِ"},
+    ],
+    "fill_in": [
+        {"sentence": "اللُّغَةُ الْعَرَبِيَّةُ لُغَةٌ ________ وَغَنِيَّةٌ بِمُفْرَدَاتِهَا", "answer": "جَمِيلَةٌ"},
+    ],
+}
+
+SL_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "self_learning.json")
+
+def _read_sl() -> dict:
+    os.makedirs(os.path.dirname(SL_FILE), exist_ok=True)
+    if not os.path.exists(SL_FILE):
+        _write_sl(DEFAULT_SELF_LEARNING)
+        return DEFAULT_SELF_LEARNING
+    with open(SL_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def _write_sl(data: dict):
+    os.makedirs(os.path.dirname(SL_FILE), exist_ok=True)
+    with open(SL_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+class QuizQuestion(BaseModel):
+    q: str
+    options: List[str]
+    correct: int
+
+class WordOrderQuestion(BaseModel):
+    words: List[str]
+    answer: str
+
+class FillInQuestion(BaseModel):
+    sentence: str
+    answer: str
+
+
+@router.get("/self-learning")
+def get_self_learning():
+    return _read_sl()
+
+@router.post("/self-learning/quiz")
+def add_quiz_question(q: QuizQuestion):
+    data = _read_sl()
+    data["quiz"].append(q.dict())
+    _write_sl(data)
+    return {"ok": True}
+
+@router.put("/self-learning/quiz/{idx}")
+def update_quiz_question(idx: int, q: QuizQuestion):
+    data = _read_sl()
+    if idx >= len(data["quiz"]):
+        raise HTTPException(404, "السؤال غير موجود")
+    data["quiz"][idx] = q.dict()
+    _write_sl(data)
+    return {"ok": True}
+
+@router.delete("/self-learning/quiz/{idx}")
+def delete_quiz_question(idx: int):
+    data = _read_sl()
+    if idx >= len(data["quiz"]):
+        raise HTTPException(404, "السؤال غير موجود")
+    data["quiz"].pop(idx)
+    _write_sl(data)
+    return {"ok": True}
+
+@router.post("/self-learning/word-order")
+def add_word_order(q: WordOrderQuestion):
+    data = _read_sl()
+    data["word_order"].append(q.dict())
+    _write_sl(data)
+    return {"ok": True}
+
+@router.put("/self-learning/word-order/{idx}")
+def update_word_order(idx: int, q: WordOrderQuestion):
+    data = _read_sl()
+    if idx >= len(data["word_order"]):
+        raise HTTPException(404, "السؤال غير موجود")
+    data["word_order"][idx] = q.dict()
+    _write_sl(data)
+    return {"ok": True}
+
+@router.delete("/self-learning/word-order/{idx}")
+def delete_word_order(idx: int):
+    data = _read_sl()
+    if idx >= len(data["word_order"]):
+        raise HTTPException(404, "السؤال غير موجود")
+    data["word_order"].pop(idx)
+    _write_sl(data)
+    return {"ok": True}
+
+@router.post("/self-learning/fill-in")
+def add_fill_in(q: FillInQuestion):
+    data = _read_sl()
+    data["fill_in"].append(q.dict())
+    _write_sl(data)
+    return {"ok": True}
+
+@router.put("/self-learning/fill-in/{idx}")
+def update_fill_in(idx: int, q: FillInQuestion):
+    data = _read_sl()
+    if idx >= len(data["fill_in"]):
+        raise HTTPException(404, "السؤال غير موجود")
+    data["fill_in"][idx] = q.dict()
+    _write_sl(data)
+    return {"ok": True}
+
+@router.delete("/self-learning/fill-in/{idx}")
+def delete_fill_in(idx: int):
+    data = _read_sl()
+    if idx >= len(data["fill_in"]):
+        raise HTTPException(404, "السؤال غير موجود")
+    data["fill_in"].pop(idx)
+    _write_sl(data)
+    return {"ok": True}
