@@ -420,3 +420,72 @@ def delete_quick_quiz(idx: int):
     data["quick_quiz"].pop(idx)
     _write_games(data)
     return {"ok": True}
+
+
+# ── Dictation Journey ──
+
+DICTATION_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "dictation.json")
+
+DEFAULT_DICTATION = [
+    {"word": "بِئْرٌ", "type": "الْهَمْزَةُ الْمُتَوَسِّطَةُ", "correct": "بِئْرٌ", "opts": ["بِيرٌ", "بِئْرٌ", "بِيئَرٌ", "بِئَرٌ"], "hint": "الْهَمْزَةُ عَلَى نَبْرَةٍ لِأَنَّ مَا قَبْلَهَا كَسْرَةٌ", "img": "https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=600&q=80"},
+    {"word": "فِئَةٌ", "type": "الْهَمْزَةُ الْمُتَوَسِّطَةُ", "correct": "فِئَةٌ", "opts": ["فِيئَةٌ", "فِأَةٌ", "فِئَةٌ", "فِاَةٌ"], "hint": "الْهَمْزَةُ عَلَى نَبْرَةٍ لِأَنَّ مَا قَبْلَهَا كَسْرَةٌ", "img": "https://images.unsplash.com/photo-1529156069898-49953e39b3ac?w=600&q=80"},
+    {"word": "سُئِلَ", "type": "الْهَمْزَةُ الْمُتَوَسِّطَةُ", "correct": "سُئِلَ", "opts": ["سُءِلَ", "سُئِلَ", "سُوئِلَ", "سُيِلَ"], "hint": "الْهَمْزَةُ عَلَى نَبْرَةٍ لِأَنَّ مَا بَعْدَهَا كَسْرَةٌ", "img": "https://images.unsplash.com/photo-1488190211105-8b0e65b80b4e?w=600&q=80"},
+    {"word": "يَسْأَلُ", "type": "الْهَمْزَةُ الْمُتَوَسِّطَةُ", "correct": "يَسْأَلُ", "opts": ["يَسْئَلُ", "يَسَالُ", "يَسْأَلُ", "يَسَألُ"], "hint": "الْهَمْزَةُ عَلَى أَلِفٍ لِأَنَّ مَا قَبْلَهَا سَاكِنٌ", "img": "https://images.unsplash.com/photo-1532153975070-2e9ab71f1b14?w=600&q=80"},
+    {"word": "بَدْءٌ", "type": "الْهَمْزَةُ الْمُتَطَرِّفَةُ", "correct": "بَدْءٌ", "opts": ["بَدَأٌ", "بَدَاءٌ", "بَدْءٌ", "بَدِيءٌ"], "hint": "الْهَمْزَةُ عَلَى السَّطْرِ لِأَنَّ مَا قَبْلَهَا سَاكِنٌ", "img": "https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=600&q=80"},
+    {"word": "شَيْءٌ", "type": "الْهَمْزَةُ الْمُتَطَرِّفَةُ", "correct": "شَيْءٌ", "opts": ["شَيِئٌ", "شَيْءٌ", "شَيَاءٌ", "شَيَءٌ"], "hint": "الْهَمْزَةُ عَلَى السَّطْرِ لِأَنَّ مَا قَبْلَهَا سَاكِنٌ", "img": "https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=600&q=80"},
+    {"word": "مَسَاءٌ", "type": "الْهَمْزَةُ الْمُتَطَرِّفَةُ", "correct": "مَسَاءٌ", "opts": ["مَسَاءً", "مَسَاؤُ", "مَسَاءٌ", "مَسَائٌ"], "hint": "الْهَمْزَةُ عَلَى السَّطْرِ لِأَنَّ مَا قَبْلَهَا أَلِفٌ", "img": "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=600&q=80"},
+    {"word": "هُدُوءٌ", "type": "الْهَمْزَةُ الْمُتَطَرِّفَةُ", "correct": "هُدُوءٌ", "opts": ["هُدُوُ", "هُدُوئٌ", "هُدُءٌ", "هُدُوءٌ"], "hint": "الْهَمْزَةُ عَلَى السَّطْرِ لِأَنَّ مَا قَبْلَهَا وَاوٌ سَاكِنَةٌ", "img": "https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=600&q=80"},
+    {"word": "لُؤْلُؤٌ", "type": "الْهَمْزَةُ الْمُتَطَرِّفَةُ", "correct": "لُؤْلُؤٌ", "opts": ["لُولُوٌ", "لُؤْلُوٌ", "لُؤْلُؤٌ", "لُولُؤٌ"], "hint": "الْهَمْزَةُ عَلَى وَاوٍ لِأَنَّ مَا قَبْلَهَا ضَمَّةٌ", "img": "https://images.unsplash.com/photo-1515377905703-c4788e51af15?w=600&q=80"},
+    {"word": "قَرَأَ", "type": "الْهَمْزَةُ الْمُتَطَرِّفَةُ", "correct": "قَرَأَ", "opts": ["قَرَاءَ", "قَرَءَ", "قَرَأَ", "قَرَئَ"], "hint": "الْهَمْزَةُ عَلَى أَلِفٍ لِأَنَّ مَا قَبْلَهَا فَتْحَةٌ", "img": "https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8?w=600&q=80"},
+]
+
+
+def _read_dictation() -> list:
+    os.makedirs(os.path.dirname(DICTATION_FILE), exist_ok=True)
+    if not os.path.exists(DICTATION_FILE):
+        _write_dictation(DEFAULT_DICTATION)
+        return DEFAULT_DICTATION
+    with open(DICTATION_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_dictation(data: list):
+    os.makedirs(os.path.dirname(DICTATION_FILE), exist_ok=True)
+    with open(DICTATION_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+class DictationQuestion(BaseModel):
+    word: str
+    type: str
+    correct: str
+    opts: List[str]
+    hint: str
+    img: str = "https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8?w=600&q=80"
+
+
+@router.get("/dictation")
+def get_dictation():
+    return _read_dictation()
+
+@router.post("/dictation")
+def add_dictation(q: DictationQuestion):
+    data = _read_dictation()
+    data.append(q.dict())
+    _write_dictation(data)
+    return {"ok": True}
+
+@router.put("/dictation/{idx}")
+def update_dictation(idx: int, q: DictationQuestion):
+    data = _read_dictation()
+    if idx >= len(data): raise HTTPException(404, "غير موجود")
+    data[idx] = q.dict()
+    _write_dictation(data)
+    return {"ok": True}
+
+@router.delete("/dictation/{idx}")
+def delete_dictation(idx: int):
+    data = _read_dictation()
+    data.pop(idx)
+    _write_dictation(data)
+    return {"ok": True}
