@@ -489,3 +489,75 @@ def delete_dictation(idx: int):
     data.pop(idx)
     _write_dictation(data)
     return {"ok": True}
+
+
+# ── Hamza Games (WritingGames) ──
+
+HAMZA_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "hamza_games.json")
+
+DEFAULT_HAMZA = {
+    "l1_gate":     [],
+    "l1_cross":    [],
+    "l1_fix":      [],
+    "l2_river":    [],
+    "l2_cross":    [],
+    "l2_fill":     [],
+    "l3_mountain": [],
+    "l3_cross":    [],
+}
+
+VALID_KEYS = set(DEFAULT_HAMZA.keys())
+
+
+def _read_hamza() -> dict:
+    os.makedirs(os.path.dirname(HAMZA_FILE), exist_ok=True)
+    if not os.path.exists(HAMZA_FILE):
+        _write_hamza(DEFAULT_HAMZA)
+        return DEFAULT_HAMZA
+    with open(HAMZA_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_hamza(data: dict):
+    os.makedirs(os.path.dirname(HAMZA_FILE), exist_ok=True)
+    with open(HAMZA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+@router.get("/hamza-games")
+def get_hamza_games():
+    return _read_hamza()
+
+
+@router.post("/hamza-games/{key}")
+def add_hamza_item(key: str, item: dict):
+    if key not in VALID_KEYS:
+        raise HTTPException(400, f"مفتاح غير صالح: {key}")
+    data = _read_hamza()
+    data[key].append(item)
+    _write_hamza(data)
+    return {"ok": True}
+
+
+@router.put("/hamza-games/{key}/{idx}")
+def update_hamza_item(key: str, idx: int, item: dict):
+    if key not in VALID_KEYS:
+        raise HTTPException(400, f"مفتاح غير صالح: {key}")
+    data = _read_hamza()
+    if idx >= len(data[key]):
+        raise HTTPException(404, "العنصر غير موجود")
+    data[key][idx] = item
+    _write_hamza(data)
+    return {"ok": True}
+
+
+@router.delete("/hamza-games/{key}/{idx}")
+def delete_hamza_item(key: str, idx: int):
+    if key not in VALID_KEYS:
+        raise HTTPException(400, f"مفتاح غير صالح: {key}")
+    data = _read_hamza()
+    if idx >= len(data[key]):
+        raise HTTPException(404, "العنصر غير موجود")
+    data[key].pop(idx)
+    _write_hamza(data)
+    return {"ok": True}
