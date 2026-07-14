@@ -4,6 +4,7 @@ from app.services.speech_eval import transcribe_arabic_audio, evaluate_speaking
 from app.services.writing_eval import evaluate_writing
 from app.services.diacritize import diacritize_text
 from app.services.context_eval import evaluate_context
+from app.services.spell_check import check_spelling
 
 router = APIRouter()
 
@@ -19,6 +20,11 @@ class DiacritizeRequest(BaseModel):
     text: str
 
 
+class SpellCheckRequest(BaseModel):
+    text: str
+    use_ai: bool = True  # عطّلها لفحص فوري بدون استدعاء Gemini
+
+
 @router.post("/diacritize")
 def diacritize_endpoint(request: DiacritizeRequest):
     """إضافة التشكيل وعلامات الترقيم للنص العربي"""
@@ -27,6 +33,18 @@ def diacritize_endpoint(request: DiacritizeRequest):
         return {"result": result}
     except Exception as e:
         raise HTTPException(500, f"خطأ في التشكيل: {str(e)}")
+
+
+@router.post("/spellcheck")
+def spellcheck_endpoint(request: SpellCheckRequest):
+    """
+    تدقيق إملائي/نحوي متقدم: يعيد قائمة الأخطاء مع موقعها الحرفي
+    (start/end) في النص لإبرازها في الواجهة، والتصحيح المقترح.
+    """
+    try:
+        return check_spelling(request.text, use_ai=request.use_ai)
+    except Exception as e:
+        raise HTTPException(500, f"خطأ في التدقيق الإملائي: {str(e)}")
 
 
 @router.post("/speech")
