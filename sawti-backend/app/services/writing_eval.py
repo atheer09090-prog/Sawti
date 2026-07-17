@@ -1,4 +1,5 @@
 import re
+from app.services.spell_check import check_spelling
 
 # قاموس الأخطاء الإملائية الشائعة
 SPELLING_ERRORS = {
@@ -92,14 +93,11 @@ def evaluate_writing(text: str, min_words: int = 20) -> dict:
 
 
 def _check_spelling(text: str, words: list) -> dict:
-    errors = []
-    corrections = []
-    for word in words:
-        clean_word = re.sub(r'[\u064B-\u065F\u060C\u061B\u061F.,!?]', '', word)
-        if clean_word in SPELLING_ERRORS:
-            errors.append(clean_word)
-            corrections.append({"wrong": clean_word, "correct": SPELLING_ERRORS[clean_word],
-                                 "explanation": "خطأ إملائي"})
+    result = check_spelling(text, use_ai=True)
+    found_errors = result["errors"]
+    errors = [e["wrong"] for e in found_errors]
+    corrections = [{"wrong": e["wrong"], "correct": e["correct"], "explanation": e["explanation"]}
+                   for e in found_errors]
     total_words = max(len(words), 1)
     error_rate = len(errors) / total_words
     score = max(0, int((1 - error_rate * 3) * 100))
