@@ -135,7 +135,10 @@ def _check_structure(text: str, words: list, word_count: int, min_words: int) ->
 def _get_strengths(spelling: dict, structure: dict) -> list:
     strengths = []
     if spelling["score"] >= 80:
-        strengths.append("إملاء ممتاز مع أخطاء قليلة")
+        if spelling.get("error_count", 0) == 0:
+            strengths.append("إملاء ممتاز بلا أي أخطاء")
+        else:
+            strengths.append("إملاء جيد مع أخطاء قليلة")
     if len(structure["connectors"]) >= 3:
         strengths.append("استخدام جيد لأدوات الربط")
     if structure["sentences"] >= 4:
