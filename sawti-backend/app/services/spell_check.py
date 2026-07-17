@@ -37,6 +37,7 @@ HAMZA_ERRORS: dict[str, str] = {
     "إجتمع": "اجتمع", "إحتاج": "احتاج", "إستمتع": "استمتع",
     "إشترك": "اشترك", "إعتقد": "اعتقد", "إستطاع": "استطاع",
     "إنتقل": "انتقل", "إتصل": "اتصل", "إستفاد": "استفاد",
+    "الوان": "ألوان", "الوانها": "ألوانها", "الوانه": "ألوانه",
 }
 
 # التاء المربوطة/المفتوحة والهاء
@@ -155,7 +156,7 @@ def check_spelling_layer2_gemini(text: str, known_wrong_words: set[str]) -> list
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=20) as resp:
             data = json.loads(resp.read())
             raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()
             raw = re.sub(r"^```(json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
@@ -167,7 +168,14 @@ def check_spelling_layer2_gemini(text: str, known_wrong_words: set[str]) -> list
                     continue  # تجنّب التكرار مع الطبقة الأولى
                 idx = text.find(wrong)
                 if idx == -1:
-                    continue
+                    # قد يعيد Gemini الكلمة بتشكيل مختلف عن النص الأصلي (الذي غالباً بلا تشكيل)؛
+                    # نحاول المطابقة بعد إزالة التشكيل من الكلمة المُعادة فقط
+                    wrong_clean = _normalize_for_lookup(wrong)
+                    idx = text.find(wrong_clean)
+                    if idx == -1:
+                        print(f"[spell_check] Gemini returned unmatched word: {wrong!r} not found in text")
+                        continue
+                    wrong = wrong_clean
                 results.append({
                     "wrong": wrong,
                     "correct": e.get("correct", wrong),
@@ -177,8 +185,9 @@ def check_spelling_layer2_gemini(text: str, known_wrong_words: set[str]) -> list
                     "source": "ai",
                 })
             return results
-    except Exception:
-        return []  # فشل صامت — لا نوقف الطلب بسبب Gemini
+    except Exception as ex:
+        print(f"[spell_check] Gemini layer failed: {type(ex).__name__}: {ex}")
+        return []  # لا نوقف الطلب بسبب فشل Gemini، لكن نسجّل السبب لسجلات Render
 
 
 # ============ الدالة الرئيسية ============
