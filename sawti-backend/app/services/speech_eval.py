@@ -35,14 +35,20 @@ def transcribe_arabic_audio(audio_bytes: bytes, audio_format: str = "wav") -> st
         os.unlink(tmp_path)
 
 
-def evaluate_speaking(transcript: str, reference_text: Optional[str] = None) -> dict:
+def evaluate_speaking(transcript: str, reference_text: Optional[str] = None, lesson_id: str = "") -> dict:
     if not transcript or len(transcript.strip()) < 5:
-        return {
-            "pronunciation": 0, "sentence_structure": 0,
-            "diacritics": 0, "grammar": 0, "overall": 0,
+        empty = {
+            "overall": 0, "word_count": 0, "transcript": transcript,
             "feedback": "لم يتم التعرف على الكلام. يرجى المحاولة مجدداً.",
-            "word_count": 0, "transcript": transcript,
         }
+        if lesson_id == "opinion":
+            empty.update({"opinion_clarity": 0, "reasons_score": 0, "phrases_score": 0, "coherence_score": 0, "conclusion_score": 0})
+        else:
+            empty.update({"pronunciation": 0, "sentence_structure": 0, "diacritics": 0, "grammar": 0})
+        return empty
+
+    if lesson_id == "opinion":
+        return _evaluate_opinion_speaking(transcript)
 
     words = transcript.split()
     word_count = len(words)
@@ -69,6 +75,90 @@ def evaluate_speaking(transcript: str, reference_text: Optional[str] = None) -> 
         "transcript": transcript,
         "feedback": _generate_feedback(overall, pronunciation_score, sentence_score),
     }
+
+
+# ═══════════════ تقييم مخصَّص لنشاط "التعبير عن الرأي" ═══════════════
+# يركّز على: وضوح الرأي، وجود أسباب مقنعة، استخدام عبارات إبداء الرأي،
+# ترابط الأفكار، ووجود خاتمة — وليس على عدد الكلمات فقط.
+
+_OPINION_OPENERS = ["أعتقد", "برأيي", "في رأيي", "من وجهة نظري", "أرى أن", "أظن"]
+_REASON_MARKERS  = ["لأن", "لأنّ", "بسبب", "وذلك لأن", "نظراً لـ", "نظراً ل"]
+_CONNECTORS      = ["أولاً", "ثانياً", "ثالثاً", "بعد ذلك", "أيضاً", "بالإضافة إلى ذلك", "كذلك", "علاوة على ذلك", "من ناحية أخرى"]
+_CONCLUDERS      = ["لذلك", "لهذا", "وأخيراً", "أخيراً", "في الختام", "وفي الختام", "وباختصار", "خلاصة القول", "إذن"]
+
+
+def _evaluate_opinion_speaking(transcript: str) -> dict:
+    words = transcript.split()
+    word_count = len(words)
+    last_third = transcript[int(len(transcript) * 0.6):]  # الجزء الأخير من الحديث، لفحص الخاتمة
+
+    # ١) وضوح الرأي: وجود عبارة إبداء رأي صريحة + طول كافٍ للتعبير
+    openers_found = [p for p in _OPINION_OPENERS if p in transcript]
+    clarity_score = 40
+    if openers_found: clarity_score += 40
+    if word_count >= 15: clarity_score += 20
+    clarity_score = min(100, clarity_score)
+
+    # ٢) الأسباب: كل "لأن" أو ما شابهها تُحسب سبباً داعماً للرأي
+    reasons_found = sum(transcript.count(m) for m in _REASON_MARKERS)
+    if reasons_found == 0:   reasons_score = 30
+    elif reasons_found == 1: reasons_score = 70
+    else:                    reasons_score = 100
+
+    # ٣) عبارات إبداء الرأي (أعتقد/في رأيي/لأن/لذلك...) — عدد العبارات المميزة المستخدمة
+    phrase_pool = _OPINION_OPENERS + _REASON_MARKERS + _CONCLUDERS
+    phrases_used = sorted(set(p for p in phrase_pool if p in transcript))
+    phrases_score = min(100, 30 + len(phrases_used) * 20)
+
+    # ٤) ترابط الأفكار: أدوات ربط/تسلسل + وجود أكثر من جملة (فواصل/نقاط)
+    connectors_found = sum(1 for c in _CONNECTORS if c in transcript)
+    coherence_score = 40 + min(40, connectors_found * 15)
+    if "،" in transcript or "." in transcript:
+        coherence_score += 20
+    coherence_score = min(100, coherence_score)
+
+    # ٥) الخاتمة: هل ظهرت عبارة ختامية في الجزء الأخير من الحديث؟
+    concluders_found = [c for c in _CONCLUDERS if c in last_third]
+    conclusion_score = 100 if concluders_found else (50 if any(c in transcript for c in _CONCLUDERS) else 20)
+
+    overall = round(
+        (clarity_score    * 0.25) +
+        (reasons_score    * 0.30) +
+        (phrases_score    * 0.15) +
+        (coherence_score  * 0.15) +
+        (conclusion_score * 0.15)
+    )
+
+    return {
+        "opinion_clarity": clarity_score,
+        "reasons_score": reasons_score,
+        "reasons_count": reasons_found,
+        "phrases_score": phrases_score,
+        "phrases_used": phrases_used,
+        "coherence_score": coherence_score,
+        "conclusion_score": conclusion_score,
+        "overall": overall,
+        "word_count": word_count,
+        "transcript": transcript,
+        "feedback": _generate_opinion_feedback(overall, reasons_found, bool(openers_found), bool(concluders_found)),
+    }
+
+
+def _generate_opinion_feedback(overall: int, reasons_found: int, has_opener: bool, has_conclusion: bool) -> str:
+    if overall >= 85:
+        return "ممتاز! عبّرت عن رأيك بوضوح ودعمته بأسباب مقنعة، وأنهيت حديثك بخاتمة مناسبة."
+    tips = []
+    if not has_opener:
+        tips.append("ابدأ حديثك بعبارة واضحة مثل «أعتقد أن...» أو «في رأيي...»")
+    if reasons_found == 0:
+        tips.append("أضِف سبباً واحداً على الأقل يدعم رأيك باستخدام «لأن...»")
+    elif reasons_found == 1:
+        tips.append("حاول إضافة سبب ثانٍ ليصبح رأيك أكثر إقناعاً")
+    if not has_conclusion:
+        tips.append("اختم حديثك بجملة قصيرة تلخّص رأيك، مثل «لذلك أعتقد...»")
+    if not tips:
+        return "جيد جداً! رأيك واضح ومنظّم، استمر في التدريب لتطوير أسلوبك أكثر."
+    return "جيد! " + " — ".join(tips)
 
 
 def _evaluate_pronunciation(transcript: str, reference: Optional[str]) -> int:
