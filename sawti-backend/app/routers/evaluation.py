@@ -64,7 +64,7 @@ async def evaluate_speech_endpoint(
 
     try:
         transcript = transcribe_arabic_audio(audio_bytes, audio_format)
-        result = evaluate_speaking(transcript, reference_text or None)
+        result = evaluate_speaking(transcript, reference_text or None, lesson_id)
         result["student_id"] = student_id
         result["lesson_id"] = lesson_id
         return result
