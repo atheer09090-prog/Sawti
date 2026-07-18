@@ -43,12 +43,16 @@ def evaluate_speaking(transcript: str, reference_text: Optional[str] = None, les
         }
         if lesson_id == "opinion":
             empty.update({"opinion_clarity": 0, "reasons_score": 0, "phrases_score": 0, "coherence_score": 0, "conclusion_score": 0})
+        elif lesson_id == "earth":
+            empty.update({"understanding_score": 0, "goal_score": 0, "vocabulary_score": 0, "coherence_score": 0, "opinion_score": 0})
         else:
             empty.update({"pronunciation": 0, "sentence_structure": 0, "diacritics": 0, "grammar": 0})
         return empty
 
     if lesson_id == "opinion":
         return _evaluate_opinion_speaking(transcript)
+    if lesson_id == "earth":
+        return _evaluate_comprehension_speaking(transcript)
 
     words = transcript.split()
     word_count = len(words)
@@ -211,3 +215,76 @@ def _generate_feedback(overall: int, pronunciation: int, structure: int) -> str:
     elif overall >= 70: return "جيد جداً! يمكنك تحسين النطق أكثر بالتدريب المستمر."
     elif overall >= 55: return "جيد! ركّز على بناء الجمل الكاملة وإضافة أدوات الربط."
     else: return "استمر في التدريب! حاول التحدث بجمل أطول وأكثر وضوحاً."
+
+
+# ═══════════════ تقييم مخصَّص لنشاط "قراءة منشور توعوي" (فهم واستيعاب) ═══════════════
+# يركّز على: فهم الفكرة، توضيح الهدف، مفردات الموضوع، ترابط الأفكار، ورأي/اقتراح مناسب.
+
+_EARTH_TOPIC_WORDS = ["ساعة الأرض", "البيئة", "المحافظة", "الطاقة", "الكهرباء", "ترشيد",
+                      "المشاركة", "المجتمع", "كوكب الأرض", "المستقبل", "التلوث", "الوعي",
+                      "أضواء", "إطفاء", "انطفاء", "استهلاك"]
+_GOAL_MARKERS = ["الهدف", "من أجل", "لكي", "حتى", "بهدف", "تهدف", "الغرض"]
+_OPINION_SUGGESTION_MARKERS = ["أعتقد", "أرى", "أقترح", "يجب", "من المهم", "ينبغي",
+                               "لذلك", "أنصح", "من رأيي", "في رأيي"]
+
+
+def _evaluate_comprehension_speaking(transcript: str) -> dict:
+    words = transcript.split()
+    word_count = len(words)
+
+    # ١) فهم الفكرة الرئيسة: وجود كلمات الموضوع الأساسية
+    topic_hits = sum(1 for w in _EARTH_TOPIC_WORDS if w in transcript)
+    understanding_score = min(100, 30 + topic_hits * 18)
+
+    # ٢) توضيح الهدف من المنشور
+    has_goal_marker = any(m in transcript for m in _GOAL_MARKERS)
+    goal_score = 85 if (has_goal_marker and topic_hits >= 1) else (55 if topic_hits >= 1 else 25)
+
+    # ٣) مفردات مرتبطة بالموضوع (تنوّع الكلمات المستخدمة من قاموس الموضوع)
+    vocabulary_score = min(100, 20 + topic_hits * 15)
+
+    # ٤) ترابط الأفكار وتسلسلها
+    connectors_found = sum(1 for c in _CONNECTORS if c in transcript)
+    coherence_score = 40 + min(40, connectors_found * 15)
+    if "،" in transcript or "." in transcript:
+        coherence_score += 20
+    coherence_score = min(100, coherence_score)
+
+    # ٥) رأي أو اقتراح مناسب في نهاية الحديث
+    has_opinion = any(m in transcript for m in _OPINION_SUGGESTION_MARKERS)
+    opinion_score = 90 if has_opinion else 30
+
+    overall = round(
+        (understanding_score * 0.30) +
+        (goal_score          * 0.20) +
+        (vocabulary_score    * 0.20) +
+        (coherence_score     * 0.15) +
+        (opinion_score       * 0.15)
+    )
+
+    return {
+        "understanding_score": understanding_score,
+        "goal_score": goal_score,
+        "vocabulary_score": vocabulary_score,
+        "coherence_score": coherence_score,
+        "opinion_score": opinion_score,
+        "overall": overall,
+        "word_count": word_count,
+        "transcript": transcript,
+        "feedback": _generate_comprehension_feedback(overall, topic_hits, has_goal_marker, has_opinion),
+    }
+
+
+def _generate_comprehension_feedback(overall: int, topic_hits: int, has_goal: bool, has_opinion: bool) -> str:
+    if overall >= 85:
+        return "ممتاز! فهمت فكرة المنشور ووضّحت هدفه، واستخدمت مفردات مناسبة، وختمت برأي واضح."
+    tips = []
+    if topic_hits == 0:
+        tips.append("استخدم كلمات من المنشور نفسه (مثل: ساعة الأرض، البيئة، الطاقة) لتُظهر فهمك للفكرة")
+    if not has_goal:
+        tips.append("وضّح الهدف من المنشور، مثلاً: «الهدف من هذا المنشور هو...»")
+    if not has_opinion:
+        tips.append("اختم حديثك برأيك أو اقتراحك، مثل: «أعتقد أن...» أو «أقترح أن...»")
+    if not tips:
+        return "جيد جداً! استمر في تنظيم أفكارك بهذا الشكل الواضح."
+    return "جيد! " + " — ".join(tips)
