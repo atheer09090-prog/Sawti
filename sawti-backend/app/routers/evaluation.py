@@ -63,7 +63,7 @@ async def evaluate_speech_endpoint(
     audio_format = filename.split(".")[-1] if "." in filename else "wav"
 
     try:
-        transcript = transcribe_arabic_audio(audio_bytes, audio_format)
+        transcript = transcribe_arabic_audio(audio_bytes, audio_format, topic_hint=reference_text)
         result = evaluate_speaking(transcript, reference_text or None, lesson_id)
         result["student_id"] = student_id
         result["lesson_id"] = lesson_id
