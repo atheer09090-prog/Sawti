@@ -4,16 +4,59 @@ import tempfile
 from typing import Optional
 from groq import Groq
 
-# كلمات شائعة تساعد Whisper على التعرف الصحيح
-ARABIC_PROMPT = (
-    "هذا تسجيل صوتي لطالب يتحدث باللغة العربية الفصحى. "
-    "الكلمات الشائعة: رحلة، بحرية، جبلية، جوية، تجوال، استمتعنا، "
-    "الأشجار، الشلال، الطائرة، المطار، الشاطئ، القوارب، الأسماك، "
-    "الصيد، المدرسة، المعلم، الطالب، ذهبنا، قمنا، رأينا، شاهدنا، "
-    "جميلة، رائعة، ممتعة، كثيراً، أيضاً، لقد، وقد، فقد."
+# كلمات عامة شائعة تساعد Whisper على التعرف الصحيح (تُستخدم دائماً كأساس)
+BASE_ARABIC_PROMPT = (
+    "هذا تسجيل صوتي لطالب عُماني في الصف السادس يتحدث باللغة العربية الفصحى بصوت طفل، "
+    "وبلهجة خليجية يُنطق فيها حرف الجيم أحياناً بصوت قريب من القاف (كما في كلمة الجو والجزر). "
+    "ذهبنا، قمنا، رأينا، شاهدنا، جميلة، رائعة، ممتعة، كثيراً، أيضاً، لقد، وقد، فقد، "
+    "أعتقد، في رأيي، لأن، لذلك، أولاً، ثانياً، أخيراً."
 )
 
-def transcribe_arabic_audio(audio_bytes: bytes, audio_format: str = "wav") -> str:
+# مفردات إضافية خاصة بكل موضوع/درس — كلما كانت أدق كانت دقة النسخ أعلى.
+# نفس الكلمات المستخدمة في صفحات "الكلمات المساعدة" بالفرونت إند (Speaking.tsx / Writing.tsx)،
+# مكرَّرة هنا عمداً لتغذية Whisper مباشرة قبل النسخ (وليس لعرضها للمستخدم).
+TOPIC_VOCAB: dict[str, str] = {
+    "رحلة بحرية": "البحر، السفينة، الشاطئ، الأمواج، السمك، الغوص، السباحة، الرمال، الشمس، المنظر الجميل",
+    "رحلة جبلية": "الجبل، القمة، التسلق، الهواء النقي، الأشجار، المخيم، المشي، الطبيعة، البرودة، المنظر الخلاب",
+    "رحلة جوية": "الطائرة، المطار، الرحلة، السفر، الجواز، الحقائب، السماء، المضيف، المقعد، الهبوط",
+    "صورة دالة على تعلم": "التعلم، المعرفة، المعلم، الكتاب، المهارة، التجربة، الاكتشاف، الفهم، التدريب، النجاح",
+    "الأجهزة الإلكترونية": "الهاتف، الإنترنت، الدراسة، الترفيه، تنظيم الوقت، مفيد، مضر",
+    "البيئة": "البيئة، الأشجار، التلوث، النظافة، إعادة التدوير، المياه، المسؤولية، التعاون، المستقبل، المحافظة",
+    "القراءة": "القراءة، المعرفة، التعلم، الكتب، المكتبة، المعلومات، الفهم، التركيز، الخيال، الثقافة",
+    "ساعة الأرض": "ساعة الأرض، البيئة، المحافظة، الطاقة، الكهرباء، ترشيد، المشاركة، المجتمع، كوكب الأرض، التلوث، الوعي",
+}
+
+
+def _build_prompt(topic_hint: str = "") -> str:
+    """يبني توجيهاً (Prompt) لِـ Whisper: الأساس العام + مفردات الموضوع المطابقة إن وُجدت."""
+    prompt = BASE_ARABIC_PROMPT
+    if topic_hint:
+        clean_hint = re.sub(r"[\u064B-\u065F\u0670]", "", topic_hint)  # إزالة التشكيل قبل المطابقة
+        for key, vocab in TOPIC_VOCAB.items():
+            if key in clean_hint or clean_hint in key:
+                prompt = f"{prompt} كلمات متوقعة في هذا الموضوع: {vocab}."
+                break
+    return prompt
+
+
+# تصحيح ما بعد النسخ لالتباسات صوتية شائعة في اللهجة الخليجية/العُمانية (القاف تُسمع مكان الجيم
+# أحياناً بسبب طريقة النطق المحلية). هذه مطابقة "كلمة كاملة" وليست استبدال حرف عام، لتفادي
+# إفساد كلمات صحيحة تحتوي فعلاً على قاف (مثل: قمنا، قارب، قال).
+PHONETIC_CONFUSIONS: dict[str, str] = {
+    "القو": "الجو", "قو": "جو",
+    "القزر": "الجزر", "قزر": "جزر",
+    "البعر": "البحر", "بعر": "بحر",
+}
+
+
+def _fix_phonetic_confusions(text: str) -> str:
+    def repl(m: "re.Match[str]") -> str:
+        word = m.group(0)
+        return PHONETIC_CONFUSIONS.get(word, word)
+    return re.sub(r"[\w\u0621-\u064A]+", repl, text)
+
+
+def transcribe_arabic_audio(audio_bytes: bytes, audio_format: str = "wav", topic_hint: str = "") -> str:
     client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
     with tempfile.NamedTemporaryFile(suffix=f".{audio_format}", delete=False) as tmp:
@@ -27,10 +70,12 @@ def transcribe_arabic_audio(audio_bytes: bytes, audio_format: str = "wav") -> st
                 model="whisper-large-v3",
                 language="ar",
                 response_format="text",
-                prompt=ARABIC_PROMPT,
+                prompt=_build_prompt(topic_hint),
                 temperature=0.0,  # أقل عشوائية = أدق
             )
-        return transcription.strip() if isinstance(transcription, str) else transcription.text.strip()
+        return _fix_phonetic_confusions(
+            transcription.strip() if isinstance(transcription, str) else transcription.text.strip()
+        )
     finally:
         os.unlink(tmp_path)
 
