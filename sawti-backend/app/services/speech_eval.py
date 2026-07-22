@@ -158,7 +158,38 @@ def evaluate_speaking(transcript: str, reference_text: Optional[str] = None, les
         "word_count": word_count,
         "transcript": transcript,
         "feedback": _generate_feedback(overall, pronunciation_score, sentence_score),
+        "strengths": _speaking_strengths(pronunciation_score, sentence_score, diacritics_score, grammar_score, word_count),
+        "suggestions": _speaking_suggestions(pronunciation_score, sentence_score, diacritics_score, grammar_score, word_count, transcript),
     }
+
+
+def _speaking_strengths(pronunciation: int, sentence: int, diacritics: int, grammar: int, word_count: int) -> list:
+    s = []
+    if pronunciation >= 80: s.append("🗣️ نُطْقُكَ وَاضِحٌ وَمَفْهُومٌ تَمَامًا")
+    if sentence >= 80:      s.append("📝 جُمَلُكَ مُرَتَّبَةٌ وَمُتَسَلْسِلَةٌ بِشَكْلٍ جَيِّدٍ")
+    if diacritics >= 80:    s.append("🔤 اسْتَخْدَمْتَ التَّشْكِيلَ الصَّحِيحَ فِي مُعْظَمِ الْكَلِمَاتِ")
+    if grammar >= 80:       s.append("✅ تَرْكِيبُكَ النَّحْوِيُّ سَلِيمٌ")
+    if word_count >= 40:    s.append("💬 تَحَدَّثْتَ بِإِسْهَابٍ وَتَفْصِيلٍ جَيِّدٍ")
+    if not s:
+        s.append("👍 أَكْمَلْتَ النَّشَاطَ بِنَجَاحٍ — اسْتَمِرَّ فِي الْمُحَاوَلَةِ!")
+    return s
+
+
+def _speaking_suggestions(pronunciation: int, sentence: int, diacritics: int, grammar: int, word_count: int, transcript: str) -> list:
+    tips = []
+    if pronunciation < 80:
+        tips.append("حَاوِلْ نُطْقَ الْكَلِمَاتِ الطَّوِيلَةِ بِبُطْءٍ أَكْبَرَ وَوُضُوحٍ")
+    if sentence < 80:
+        tips.append("اسْتَخْدِمْ أَدَوَاتِ رَبْطٍ مِثْلَ (ثُمَّ، بَعْدَ ذَلِكَ، لِذَلِكَ) لِتَحْسِينِ تَسَلْسُلِ جُمَلِكَ")
+    if diacritics < 80:
+        tips.append("انْتَبِهْ لِتَشْكِيلِ أَوَاخِرِ الْكَلِمَاتِ (الْحَرَكَاتِ) أَثْنَاءَ النُّطْقِ")
+    if grammar < 80:
+        tips.append("رَاجِعْ تَرْكِيبَ الْجُمْلَةِ وَتَأَكَّدْ مِنَ التَّطَابُقِ بَيْنَ الْفِعْلِ وَالْفَاعِلِ")
+    if word_count < 20:
+        tips.append("حَاوِلْ التَّحَدُّثَ لِفَتْرَةٍ أَطْوَلَ لِإِثْرَاءِ حَدِيثِكَ بِمَزِيدٍ مِنَ التَّفَاصِيلِ")
+    if not tips:
+        tips.append("أَدَاؤُكَ مُمْتَازٌ — اسْتَمِرَّ عَلَى هَذَا الْمُسْتَوَى!")
+    return tips
 
 
 # ═══════════════ تقييم مخصَّص لنشاط "التعبير عن الرأي" ═══════════════
@@ -225,7 +256,38 @@ def _evaluate_opinion_speaking(transcript: str) -> dict:
         "word_count": word_count,
         "transcript": transcript,
         "feedback": _generate_opinion_feedback(overall, reasons_found, bool(openers_found), bool(concluders_found)),
+        "strengths": _opinion_strengths(clarity_score, reasons_found, coherence_score, bool(concluders_found)),
+        "suggestions": _opinion_suggestions(bool(openers_found), reasons_found, bool(concluders_found), coherence_score),
     }
+
+
+def _opinion_strengths(clarity_score: int, reasons_found: int, coherence_score: int, has_conclusion: bool) -> list:
+    s = []
+    if clarity_score >= 80:   s.append("🗣️ عبّرت عن رأيك بوضوح منذ البداية")
+    if reasons_found >= 2:    s.append("📌 دعمت رأيك بسببين أو أكثر — إقناعٌ جيدٌ")
+    elif reasons_found == 1:  s.append("📌 دعمت رأيك بسبب واحد")
+    if coherence_score >= 80: s.append("🔗 أفكارك مترابطة ومتسلسلة بشكل منطقي")
+    if has_conclusion:        s.append("🏁 ختمت حديثك بخاتمة مناسبة")
+    if not s:
+        s.append("👍 أكملت النشاط بنجاح — استمر في المحاولة!")
+    return s
+
+
+def _opinion_suggestions(has_opener: bool, reasons_found: int, has_conclusion: bool, coherence_score: int) -> list:
+    tips = []
+    if not has_opener:
+        tips.append("ابدأ حديثك بعبارة واضحة مثل «أعتقد أن...» أو «في رأيي...»")
+    if reasons_found == 0:
+        tips.append("أضِف سبباً واحداً على الأقل يدعم رأيك باستخدام «لأن...»")
+    elif reasons_found == 1:
+        tips.append("حاول إضافة سبب ثانٍ ليصبح رأيك أكثر إقناعاً")
+    if coherence_score < 80:
+        tips.append("استخدم أدوات ربط مثل (أولاً، بالإضافة إلى ذلك) لتنظيم أفكارك")
+    if not has_conclusion:
+        tips.append("اختم حديثك بجملة قصيرة تلخّص رأيك، مثل «لذلك أعتقد...»")
+    if not tips:
+        tips.append("أداؤك ممتاز — استمر على هذا المستوى!")
+    return tips
 
 
 def _generate_opinion_feedback(overall: int, reasons_found: int, has_opener: bool, has_conclusion: bool) -> str:
@@ -352,7 +414,35 @@ def _evaluate_comprehension_speaking(transcript: str) -> dict:
         "word_count": word_count,
         "transcript": transcript,
         "feedback": _generate_comprehension_feedback(overall, topic_hits, has_goal_marker, has_opinion),
+        "strengths": _comprehension_strengths(understanding_score, goal_score, coherence_score, has_opinion),
+        "suggestions": _comprehension_suggestions(topic_hits, has_goal_marker, has_opinion, coherence_score),
     }
+
+
+def _comprehension_strengths(understanding_score: int, goal_score: int, coherence_score: int, has_opinion: bool) -> list:
+    s = []
+    if understanding_score >= 80: s.append("🧠 فهمت فكرة المنشور الرئيسة بوضوح")
+    if goal_score >= 80:          s.append("🎯 وضّحت الهدف من المنشور بدقة")
+    if coherence_score >= 80:     s.append("🔗 أفكارك مترابطة ومتسلسلة بشكل منطقي")
+    if has_opinion:               s.append("🌱 قدّمت رأياً أو اقتراحاً مناسباً")
+    if not s:
+        s.append("👍 أكملت النشاط بنجاح — استمر في المحاولة!")
+    return s
+
+
+def _comprehension_suggestions(topic_hits: int, has_goal: bool, has_opinion: bool, coherence_score: int) -> list:
+    tips = []
+    if topic_hits == 0:
+        tips.append("استخدم كلمات من المنشور نفسه (مثل: ساعة الأرض، البيئة، الطاقة) لتُظهر فهمك للفكرة")
+    if not has_goal:
+        tips.append("وضّح الهدف من المنشور، مثلاً: «الهدف من هذا المنشور هو...»")
+    if coherence_score < 80:
+        tips.append("استخدم أدوات ربط لتنظيم أفكارك بشكل أوضح")
+    if not has_opinion:
+        tips.append("اختم حديثك برأيك أو اقتراحك، مثل: «أعتقد أن...» أو «أقترح أن...»")
+    if not tips:
+        tips.append("أداؤك ممتاز — استمر على هذا المستوى!")
+    return tips
 
 
 def _generate_comprehension_feedback(overall: int, topic_hits: int, has_goal: bool, has_opinion: bool) -> str:
