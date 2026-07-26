@@ -1,5 +1,7 @@
 import os
 import re
+import json
+import urllib.request
 import tempfile
 from typing import Optional
 from groq import Groq
@@ -113,6 +115,113 @@ def transcribe_arabic_audio(audio_bytes: bytes, audio_format: str = "wav", topic
         )
     finally:
         os.unlink(tmp_path)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# مرحلة مستقلة: تصحيح أخطاء التعرف على الكلام (Speech Recognition Correction)
+# تأتي بين النسخ الصوتي (Whisper) وبين مرحلة التقييم — تُصحِّح فقط الأخطاء
+# التي يبدو بنسبة عالية أنها ناتجة عن خطأ آلي في التعرف على الصوت (وليست
+# أخطاء إملائية/نحوية حقيقية من الطالب)، بالاستعانة بسياق موضوع النشاط.
+# ═══════════════════════════════════════════════════════════════════════
+
+_STT_CORRECTION_PROMPT_TEMPLATE = """أنت خبير في تصحيح أخطاء أنظمة التعرف الآلي على الكلام العربي (Speech-to-Text).
+سيصلك نص ناتج عن تحويل كلام طالب عُماني في الصف السادس إلى نص كتابةً.
+
+مهمتك الوحيدة: تصحيح الكلمات التي يبدو بوضوح أنها أخطاء تعرّف آلي على الصوت
+(كلمة سُمِعت خطأ وتحولت لكلمة أخرى قريبة صوتياً)، وليس تصحيح إملاء الطالب أو أسلوبه.
+
+أمثلة على أخطاء التعرف الآلي على الكلام (وليست أخطاء الطالب):
+جلسنا ← قلسنا، الأسماك ← الأسماء، المسبح ← المصبح، البذور ← الكثور،
+الشاطئ ← الشاتي، رجعنا ← رقعنا، جدي ← قدي، سبحت ← صبحت
+
+يجب عليك الالتزام الصارم بهذه القواعد:
+- لا تُعِد صياغة أي جملة، ولا تجعل النص أكثر فصاحة، ولا تُغيّر أسلوب الطالب.
+- لا تُغيّر ترتيب الجمل، ولا تُضِف كلمات جديدة، ولا تحذف كلمات صحيحة.
+- لا تُصحِّح الأخطاء النحوية الطبيعية للطالب، ولا الأخطاء الإملائية العادية
+  (مثل: هاذا، مدرسه) — هذه ليست من مهمتك هنا إطلاقاً.
+- لا تعتبر اختلاف التشكيل/التنوين/الإعراب/علامات الترقيم خطأً على الإطلاق.
+- صحّح فقط كلمة يبدو بنسبة عالية جداً من الثقة أنها نتيجة سماع خاطئ للصوت،
+  خصوصاً إن كانت كلمة مقترَحة قريبة صوتياً موجودة ضمن سياق موضوع النشاط أدناه.
+- إن لم تكن واثقاً بنسبة عالية من أي تصحيح، لا تُغيّر شيئاً واتركه كما هو.
+
+سياق النشاط (استخدمه للمساعدة في الاستنتاج، لا تكرره في الإجابة):
+{context}
+
+النص الناتج من التعرف الآلي على الكلام:
+\"\"\"{text}\"\"\"
+
+أعد النتيجة بصيغة JSON فقط دون أي نص إضافي، وفق هذا الشكل بالضبط:
+{{"correctedText": "النص كاملاً بعد التصحيح فقط (أو كما هو حرفياً إن لم يوجد أي خطأ تعرّف)", "corrections": [{{"original": "الكلمة كما وردت من STT", "corrected": "الكلمة بعد التصحيح", "reason": "Speech Recognition Error"}}]}}
+
+إن لم تجد أي تصحيح، أعد: {{"correctedText": "{text}", "corrections": []}}
+"""
+
+
+def correct_stt_errors(transcript: str, topic_hint: str = "") -> dict:
+    """
+    مرحلة "Speech Recognition Correction" المستقلة: تصحح فقط أخطاء ناتجة عن
+    التعرف الآلي على الكلام (وليس أخطاء الطالب اللغوية الحقيقية)، بالاستعانة
+    بسياق موضوع النشاط وكلماته المفتاحية. تُعيد النص كما هو دون أي تعديل إن
+    تعذّر الاتصال بـGemini أو لم يكن واثقاً من أي تصحيح.
+    """
+    fallback = {"correctedText": transcript, "corrections": []}
+    api_key = os.getenv("GEMINI_API_KEY", "")
+    if not api_key or not transcript or not transcript.strip():
+        return fallback
+
+    # نبني سياق النشاط من عنوانه وكلماته المفتاحية (نفس قاموس TOPIC_VOCAB
+    # المستخدم لتوجيه Whisper، حفاظاً على مصدر واحد للمعرفة بمفردات كل موضوع)
+    clean_hint = re.sub(r"[\u064B-\u065F\u0670]", "", topic_hint) if topic_hint else ""
+    context_parts = [f"عنوان النشاط: {topic_hint}"] if topic_hint else ["لا يوجد عنوان نشاط محدد."]
+    for key, vocab in TOPIC_VOCAB.items():
+        if key in clean_hint or clean_hint in key:
+            context_parts.append(f"الكلمات المساعدة لهذا الموضوع: {vocab}")
+            break
+    context = "\n".join(context_parts)
+
+    try:
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-2.0-flash:generateContent?key={api_key}"
+        )
+        prompt = _STT_CORRECTION_PROMPT_TEMPLATE.format(context=context, text=transcript)
+        payload = json.dumps({
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.0, "maxOutputTokens": 2048},
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read())
+            raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            raw = re.sub(r"^```(json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
+            parsed = json.loads(raw)
+
+        corrected_text = parsed.get("correctedText", "").strip()
+        corrections = parsed.get("corrections", []) or []
+
+        # حماية إضافية: إن غيّر Gemini عدد الكلمات بشكل كبير (احتمال إعادة صياغة
+        # مخالفة للتعليمات)، نتجاهل تصحيحه بالكامل حفاظاً على أمانة كلام الطالب.
+        if not corrected_text:
+            return fallback
+        orig_wc, new_wc = len(transcript.split()), len(corrected_text.split())
+        if orig_wc and abs(new_wc - orig_wc) / orig_wc > 0.15:
+            print(f"[speech_eval] STT correction rejected: word count changed too much "
+                  f"({orig_wc} -> {new_wc})")
+            return fallback
+
+        clean_corrections = [
+            {"original": c.get("original", ""), "corrected": c.get("corrected", ""),
+             "reason": "Speech Recognition Error"}
+            for c in corrections if c.get("original") and c.get("corrected")
+        ]
+        return {"correctedText": corrected_text, "corrections": clean_corrections}
+    except Exception as ex:
+        print(f"[speech_eval] STT correction stage failed: {type(ex).__name__}: {ex}")
+        return fallback
 
 
 def evaluate_speaking(transcript: str, reference_text: Optional[str] = None, lesson_id: str = "") -> dict:
