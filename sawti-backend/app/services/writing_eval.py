@@ -93,7 +93,10 @@ def evaluate_writing(text: str, min_words: int = 20) -> dict:
 
 
 def _check_spelling(text: str, words: list) -> dict:
-    result = check_spelling(text, use_ai=True)
+    # use_ai=False عمداً: الأخطاء الإملائية أصبحت مسؤولية المحرك المحلي
+    # (قاموس عربي حقيقي ٤٤ ألف كلمة + BK-Tree)، وليست Gemini بعد الآن.
+    # الأخطاء النحوية/السياقية تبقى مسؤولية app/services/context_eval.py.
+    result = check_spelling(text, use_ai=False)
     found_errors = result["errors"]
     errors = [e["wrong"] for e in found_errors]
     corrections = [{"wrong": e["wrong"], "correct": e["correct"], "explanation": e["explanation"]}
