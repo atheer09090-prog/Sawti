@@ -1,6 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from pydantic import BaseModel
-from app.services.speech_eval import transcribe_arabic_audio, evaluate_speaking
+from app.services.speech_eval import transcribe_arabic_audio, evaluate_speaking, correct_stt_errors
 from app.services.writing_eval import evaluate_writing
 from app.services.diacritize import diacritize_text
 from app.services.context_eval import evaluate_context
@@ -64,9 +64,17 @@ async def evaluate_speech_endpoint(
 
     try:
         transcript = transcribe_arabic_audio(audio_bytes, audio_format, topic_hint=reference_text)
-        result = evaluate_speaking(transcript, reference_text or None, lesson_id)
+
+        # مرحلة مستقلة: تصحيح أخطاء التعرف الآلي على الكلام فقط (وليست أخطاء
+        # الطالب اللغوية) — التقييم يعتمد بعدها على النص المُصحَّح حصرياً.
+        stt_fix = correct_stt_errors(transcript, topic_hint=reference_text)
+        corrected_transcript = stt_fix["correctedText"]
+
+        result = evaluate_speaking(corrected_transcript, reference_text or None, lesson_id)
         result["student_id"] = student_id
         result["lesson_id"] = lesson_id
+        result["raw_transcript"] = transcript          # النص الخام قبل تصحيح STT (للشفافية فقط)
+        result["stt_corrections"] = stt_fix["corrections"]  # الأخطاء التي صُحِّحت ولم تُحتسَب على الطالب
         return result
     except Exception as e:
         raise HTTPException(500, f"خطأ في معالجة الصوت: {str(e)}")
