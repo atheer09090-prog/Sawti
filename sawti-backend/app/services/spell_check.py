@@ -18,6 +18,7 @@ import os
 import re
 import json
 import urllib.request
+import difflib
 
 try:
     import pyarabic.araby as araby
@@ -124,6 +125,11 @@ def _load_wordlist() -> set:
 
 
 ARABIC_WORDS: set = _load_wordlist()  # ٤٤٬١٣٠ كلمة عربية حقيقية (Arramooz)
+# كلمات صحيحة إضافية (أفعال أجوفة/معتلّة شائعة يصعب اشتقاقها بمجرد نزع
+# السوابق/اللواحق البسيط، فنضيفها صراحةً لتفادي اعتبارها أخطاءً زوراً)
+ARABIC_WORDS |= {"يحيط", "تحيط", "نحيط", "أحيط", "يحيطون", "تحيطان"}
+_ALEF_UNIFY = str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا"})
+ARABIC_WORDS_UNIFIED: set = {w.translate(_ALEF_UNIFY) for w in ARABIC_WORDS}
 
 # سوابق ولواحق شائعة نُزيلها مؤقتاً قبل البحث في القاموس، لتفادي اعتبار صيغ
 # صرفية صحيحة (جمع/مثنى/تأنيث/ضمائر متصلة) أخطاءً وهمية (False Positives).
@@ -138,6 +144,9 @@ def _in_dict(word: str) -> bool:
         return True
     # التاء المربوطة تتحوّل إلى مفتوحة قبل الضمائر المتصلة (مدرستي ← مدرسة+ي)
     if word.endswith("ت") and (word[:-1] + "ة") in ARABIC_WORDS:
+        return True
+    # توحيد صيغ الألف (أ/إ/آ) للمقارنة فقط: "امامه" يجب اعتبارها مطابقة لـ"أمام"
+    if word.translate(_ALEF_UNIFY) in ARABIC_WORDS_UNIFIED:
         return True
     return False
 
@@ -271,18 +280,40 @@ def _get_bk_tree() -> "_BKTree | None":
     return _bk_root
 
 
+
+# الحروف التي يُسمح فقط بالاختلاف فيها بين الكلمة والاقتراح (أنماط الأخطاء
+# الإملائية "الواضحة" المطلوبة تحديداً: همزات بأشكالها، تاء مربوطة/هاء،
+# ألف مقصورة/ياء) — أي فرق خارج هذه المجموعة (كاستبدال حرف جذر بحرف آخر
+# مثل ت↔م) يعني أن الكلمتين على الأرجح جذران مختلفان، فلا نقترح التصحيح.
+_WHITELIST_CHARS = set("ءأإآئؤاةهيى")
+
+
+def _is_plausible_spelling_variant(word: str, candidate: str) -> bool:
+    """يتحقق أن كل الاختلافات بين الكلمتين تقع ضمن حروف الهمزة/التاء
+    المربوطة/الألف المقصورة فقط، لا فرقاً في الجذر أو نوع الكلمة."""
+    if word == candidate:
+        return False
+    matcher = difflib.SequenceMatcher(a=word, b=candidate, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        changed = word[i1:i2] + candidate[j1:j2]
+        if any(ch not in _WHITELIST_CHARS for ch in changed):
+            return False
+    return True
+
+
 def _suggest_correction(word: str, max_dist: int | None = None) -> str | None:
-    """يقترح أقرب كلمة صحيحة من القاموس الحقيقي عبر BK-Tree، مُرتَّبة بحسب
-    المسافة الموزونة (تُفضِّل تصحيحات الحروف المتشابهة صوتياً) ثم طول الكلمة
-    الأقرب للأصل (لتفادي اقتراح كلمة قصيرة جداً غير ذات صلة).
-    نُشدِّد العتبة المسموحة للكلمات الأطول لتقليل الاقتراحات الخاطئة على
-    أفعال معتلّة نادرة لا يغطيها القاموس بشكل كافٍ."""
+    """يقترح أقرب كلمة صحيحة من القاموس الحقيقي عبر BK-Tree، بشرط أن يكون
+    الفرق بينها وبين الكلمة الأصلية مقتصراً على أنماط أخطاء معروفة فقط
+    (وليس أي تشابه نصي عام قد يخلط بين كلمتين من جذرين مختلفين تماماً)."""
     if max_dist is None:
         max_dist = 1 if len(word) >= 6 else 2
     tree = _get_bk_tree()
     if tree is None or len(word) < 3:
         return None
     candidates = tree.search(word, max_dist)
+    candidates = [c for c in candidates if _is_plausible_spelling_variant(word, c[0])]
     if not candidates:
         return None
     candidates.sort(key=lambda c: (_weighted_distance(word, c[0]), abs(len(c[0]) - len(word))))
