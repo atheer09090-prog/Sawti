@@ -561,3 +561,152 @@ def delete_hamza_item(key: str, idx: int):
     data[key].pop(idx)
     _write_hamza(data)
     return {"ok": True}
+
+
+# ══════════════════════════════════════════════════════════════════
+# محتوى ألعاب الهمزة الحالية (الثلاث رحلات: رحلة المستكشف / الغواص
+# وصائد اللآلئ / قائد المنطاد). يسمح للمعلم بتعديل الكلمات والخيارات
+# والتعليلات وقاعدة كل رحلة، ويقرؤه الطالب مباشرة داخل صفحات الألعاب.
+# محفوظ كـ JSON خام (بدون نموذج Pydantic صارم) لأن شكل الحقول يختلف
+# بين الرحلات الثلاث (word pairs / نص مع صح-خطأ / إلخ).
+# ══════════════════════════════════════════════════════════════════
+JOURNEYS_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "hamza_journeys.json")
+
+DEFAULT_JOURNEYS = {
+    "l1": {
+        "rule": "تُكتب الهمزة المتوسطة على ياء إذا كانت مكسورة، أو كان الحرف الذي قبلها مكسورًا، أو سُبقت بياء ساكنة وكانت الهمزة مفتوحة أو مضمومة — لأن الكسرة أقوى الحركات.",
+        "rock1Sets": [
+            [{"label": "زَائِر", "correct": True}, {"label": "زَاءِر", "correct": False}],
+            [{"label": "ذِئْب", "correct": True}, {"label": "ذِأْب", "correct": False}],
+            [{"label": "مِئْذَنَة", "correct": True}, {"label": "مِأْذَنَة", "correct": False}],
+        ],
+        "rock1Explanations": [
+            "حركة الهمزة في «زائر» كسرة، فتُكتب على ياء.",
+            "الحرف الذي قبل الهمزة في «ذئب» (الذال) مكسور، فتُكتب على ياء.",
+            "الحرف الذي قبل الهمزة في «مئذنة» (الميم) مكسور، فتُكتب على ياء.",
+        ],
+        "rock2Explanation": "الكسرة أقوى الحركات، تليها الضمة، ثم الفتحة، ثم السكون — وهذا الترتيب هو ما يحدد شكل الهمزة عند المقارنة بين حركتها وحركة ما قبلها.",
+        "rock3Options": [
+            {"text": "لأنَّ الْهَمْزَةَ سَاكِنَةٌ وَمَا قَبْلَهَا مَكْسُورٌ", "correct": False},
+            {"text": "لأنَّ الْهَمْزَةَ مَكْسُورَةٌ وَمَا قَبْلَهَا مَفْتُوحٌ وَالْكَسْرَةُ أَقْوَى", "correct": True},
+            {"text": "لأنَّ الْهَمْزَةَ مَفْتُوحَةٌ وَمَا قَبْلَهَا مَضْمُومٌ", "correct": False},
+        ],
+        "rock3Explanation": "همزة «مُطْمَئِن» مكسورة وما قبلها مفتوح، والكسرة أقوى من الفتحة، فكُتبت على ياء.",
+        "rock4Options": [
+            {"label": "بِئْرٍ", "correct": True},
+            {"label": "بَأْرٍ", "correct": False},
+            {"label": "بُؤْرٍ", "correct": False},
+        ],
+        "rock4Explanation": "الحرف الذي قبل الهمزة في «بئر» (الباء) مكسور، فتُكتب الهمزة على ياء: بِئْرٍ.",
+    },
+    "l2": {
+        "rule": "تُكتب الهمزة المتوسطة منفردة على السطر إذا جاءت مفتوحة بعد ألف مدٍّ ساكنة، أو مفتوحة بعد واو مدٍّ ساكنة.",
+        "oyster1Sets": [
+            [{"label": "قِراءَة", "correct": True}, {"label": "قِراءية", "correct": False}],
+            [{"label": "عَباءَة", "correct": True}, {"label": "عَبائة", "correct": False}],
+            [{"label": "مُروءَة", "correct": True}, {"label": "مُروءةَ", "correct": False}],
+        ],
+        "oyster1Explanations": [
+            "الهمزة في «قراءة» مفتوحة وسبقها ألف مد ساكنة، فتُكتب منفردة على السطر.",
+            "الهمزة في «عباءة» مفتوحة وسبقها ألف مد ساكنة، فتُكتب منفردة على السطر.",
+            "الهمزة في «مروءة» مفتوحة وسبقها واو مد ساكنة، فتُكتب منفردة على السطر.",
+        ],
+        "oyster2AlefOptions": [
+            {"label": "سُكُون (مَدٌّ)", "correct": True},
+            {"label": "فَتْحَة", "correct": False},
+            {"label": "ضَمَّة", "correct": False},
+        ],
+        "oyster2HamzaOptions": [
+            {"label": "ضَمَّة", "correct": False},
+            {"label": "فَتْحَة", "correct": True},
+            {"label": "كَسْرَة", "correct": False},
+        ],
+        "oyster2Explanation": "في «قراءة»: الألف قبل الهمزة ساكنة (حرف مد)، والهمزة نفسها مفتوحة — ولذلك كُتبت منفردة على السطر.",
+        "oyster3Options": [
+            {"text": "لأنَّ الْهَمْزَةَ مَكْسُورَةٌ بَعْدَ حَرْفٍ سَاكِنٍ", "correct": False},
+            {"text": "لأنَّ الْهَمْزَةَ مَفْتُوحَةٌ وَجَاءَتْ بَعْدَ وَاوِ مَدٍّ سَاكِنَةٍ", "correct": True},
+            {"text": "لأنَّ الْهَمْزَةَ مَضْمُومَةٌ بَعْدَ فَتْحٍ", "correct": False},
+        ],
+        "oyster3Explanation": "همزة «نبوءة» مفتوحة وجاءت بعد واو مد ساكنة، فتُكتب منفردة على السطر.",
+        "oyster4Options": [
+            {"label": "رَدَاءَه", "correct": False},
+            {"label": "رَدَاءَة", "correct": True},
+            {"label": "رَدَائِه", "correct": False},
+        ],
+        "oyster4Explanation": "الكلمة الصحيحة «رَدَاءَة»: الهمزة مفتوحة بعد ألف مد ساكنة، فتُكتب منفردة على السطر.",
+    },
+    "l3": {
+        "rule": "تُكتب الهمزة المتطرفة بحسب حركة الحرف الذي يسبقها: على الألف إذا كان مفتوحًا، وعلى الواو إذا كان مضمومًا، وعلى الياء إذا كان مكسورًا، وعلى السطر إذا كان ساكنًا.",
+        "cloud1Options": [
+            {"text": "فِي أَوَّلِ الْكَلِمَةِ", "correct": False},
+            {"text": "فِي وَسَطِ الْكَلِمَةِ", "correct": False},
+            {"text": "فِي نِهَايَةِ الْكَلِمَةِ", "correct": True},
+        ],
+        "cloud1Explanation": "الهمزة المتطرفة هي الهمزة التي تقع دائمًا في آخر الكلمة، ومن هنا جاء اسمها «متطرفة».",
+        "cloud2Options": [
+            {"label": "فَتْحَة", "correct": False},
+            {"label": "ضَمَّة", "correct": False},
+            {"label": "كَسْرَة", "correct": True},
+            {"label": "سُكُون", "correct": False},
+        ],
+        "cloud2Explanation": "حرف الطاء في «شاطئ» مكسور، ولذلك كُتبت الهمزة بعده على ياء.",
+        "cloud3Options": [
+            {"text": "لِأَنَّ الْحَرْفَ الَّذِي يَسْبِقُهَا مَضْمُومٌ، وَالضَّمَّةُ تُنَاسِبُهَا الْوَاوُ", "correct": True},
+            {"text": "لِأَنَّ الْهَمْزَةَ نَفْسَهَا مَضْمُومَةٌ", "correct": False},
+            {"text": "لِأَنَّ الْحَرْفَ الَّذِي يَسْبِقُهَا سَاكِنٌ", "correct": False},
+        ],
+        "cloud3Explanation": "الحرف الذي يسبق الهمزة في «يجرؤ» (الراء) مضموم، والضمة تناسبها الواو، فكُتبت الهمزة على واو.",
+        "cloud4Options": [
+            {"label": "دِفْء", "correct": True},
+            {"label": "دَفُو", "correct": False},
+            {"label": "دِفْئ", "correct": False},
+        ],
+        "cloud4Explanation": "الكلمة الصحيحة «دِفْء»: الحرف الذي يسبق الهمزة (الفاء) ساكن، فتُكتب الهمزة على السطر.",
+    },
+}
+
+
+def _read_journeys() -> dict:
+    os.makedirs(os.path.dirname(JOURNEYS_FILE), exist_ok=True)
+    if not os.path.exists(JOURNEYS_FILE):
+        _write_journeys(DEFAULT_JOURNEYS)
+        return DEFAULT_JOURNEYS
+    with open(JOURNEYS_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    # دمج أي حقول ناقصة (مثلاً بعد تحديث الكود بحقول جديدة) مع الافتراضي
+    for jid, defaults in DEFAULT_JOURNEYS.items():
+        data.setdefault(jid, {})
+        for k, v in defaults.items():
+            data[jid].setdefault(k, v)
+    return data
+
+
+def _write_journeys(data: dict):
+    os.makedirs(os.path.dirname(JOURNEYS_FILE), exist_ok=True)
+    with open(JOURNEYS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+@router.get("/hamza-journeys")
+def get_hamza_journeys():
+    return _read_journeys()
+
+
+@router.put("/hamza-journeys/{journey_id}")
+def update_hamza_journey(journey_id: str, data: dict):
+    if journey_id not in DEFAULT_JOURNEYS:
+        raise HTTPException(400, f"رحلة غير صالحة: {journey_id}")
+    journeys = _read_journeys()
+    journeys[journey_id].update(data)
+    _write_journeys(journeys)
+    return {"ok": True}
+
+
+@router.put("/hamza-journeys/{journey_id}/reset")
+def reset_hamza_journey(journey_id: str):
+    if journey_id not in DEFAULT_JOURNEYS:
+        raise HTTPException(400, f"رحلة غير صالحة: {journey_id}")
+    journeys = _read_journeys()
+    journeys[journey_id] = DEFAULT_JOURNEYS[journey_id]
+    _write_journeys(journeys)
+    return {"ok": True}
