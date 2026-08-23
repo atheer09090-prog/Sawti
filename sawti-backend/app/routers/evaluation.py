@@ -5,6 +5,7 @@ from app.services.writing_eval import evaluate_writing
 from app.services.diacritize import diacritize_text
 from app.services.context_eval import evaluate_context
 from app.services.spell_check import check_spelling
+from app.services.ask_teacher import answer_student_question
 
 router = APIRouter()
 
@@ -23,6 +24,10 @@ class DiacritizeRequest(BaseModel):
 class SpellCheckRequest(BaseModel):
     text: str
     use_ai: bool = True  # عطّلها لفحص فوري بدون استدعاء Gemini
+
+
+class AskQuestionRequest(BaseModel):
+    question: str
 
 
 @router.post("/diacritize")
@@ -99,3 +104,13 @@ def evaluate_writing_endpoint(request: WritingEvalRequest):
         return result
     except Exception as e:
         raise HTTPException(500, f"خطأ في تقييم الكتابة: {str(e)}")
+
+
+@router.post("/ask")
+def ask_smart_teacher_endpoint(request: AskQuestionRequest):
+    """يُجيب عن سؤال يصوغه الطالب بنفسه — نشاط "🤖 اسأل بذكاء"."""
+    try:
+        answer = answer_student_question(request.question)
+        return {"answer": answer}
+    except Exception as e:
+        raise HTTPException(500, f"خطأ في الإجابة عن السؤال: {str(e)}")
