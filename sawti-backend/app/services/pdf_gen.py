@@ -1,10 +1,54 @@
+import io
+import os
+from datetime import datetime
+
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer
 from reportlab.lib import colors
 from reportlab.lib.units import cm
-import io
-from datetime import datetime
+from reportlab.lib.enums import TA_RIGHT
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+import arabic_reshaper
+from bidi.algorithm import get_display
+
+# ── تسجيل خط عربي حقيقي (Amiri — نفس خط العناوين في واجهة المنصة) ──
+# دون هذا التسجيل يستخدم ReportLab خطوطًا أساسية (Helvetica) لا تحتوي
+# حروفًا عربية إطلاقًا، فتظهر كل الكلمات العربية كمربعات فارغة في الـ PDF.
+_FONTS_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "fonts")
+_REGULAR_PATH = os.path.join(_FONTS_DIR, "Amiri-Regular.ttf")
+_BOLD_PATH = os.path.join(_FONTS_DIR, "Amiri-Bold.ttf")
+
+FONT_REGULAR = "Helvetica"
+FONT_BOLD = "Helvetica-Bold"
+
+if os.path.exists(_REGULAR_PATH):
+    pdfmetrics.registerFont(TTFont("Amiri", _REGULAR_PATH))
+    FONT_REGULAR = "Amiri"
+    if os.path.exists(_BOLD_PATH):
+        pdfmetrics.registerFont(TTFont("Amiri-Bold", _BOLD_PATH))
+        FONT_BOLD = "Amiri-Bold"
+    else:
+        FONT_BOLD = "Amiri"
+
+
+def ar(text) -> str:
+    """
+    يُعيد تشكيل النص العربي (ربط الحروف ببعضها بشكلها الصحيح) ويرتّبه
+    بصريًا من اليمين لليسار — بدون هذا تظهر الحروف منفصلة/بترتيب معكوس
+    داخل الـ PDF حتى لو كان الخط يدعم العربية، لأن ReportLab لا يقوم
+    بهذه المعالجة تلقائيًا كما يفعل المتصفح.
+    """
+    text = str(text) if text is not None else ""
+    if not text:
+        return text
+    try:
+        reshaped = arabic_reshaper.reshape(text)
+        return get_display(reshaped)
+    except Exception:
+        return text
 
 
 def generate_student_report(student_data: dict) -> bytes:
@@ -26,27 +70,49 @@ def generate_student_report(student_data: dict) -> bytes:
 
     # العنوان
     title_style = ParagraphStyle(
-        'ArabicTitle',
-        parent=styles['Title'],
+        "ArabicTitle",
+        parent=styles["Title"],
+        fontName=FONT_BOLD,
         fontSize=18,
+        alignment=TA_RIGHT,
         spaceAfter=12,
     )
-    elements.append(Paragraph("تقرير أداء الطالب", title_style))
-    elements.append(Paragraph("منصة صوتي قلمي — سلطنة عُمان", styles["Normal"]))
+    normal_style = ParagraphStyle(
+        "ArabicNormal",
+        parent=styles["Normal"],
+        fontName=FONT_REGULAR,
+        fontSize=11,
+        alignment=TA_RIGHT,
+        leading=16,
+    )
+    heading_style = ParagraphStyle(
+        "ArabicHeading",
+        parent=styles["Heading2"],
+        fontName=FONT_BOLD,
+        fontSize=14,
+        alignment=TA_RIGHT,
+        spaceBefore=8,
+        spaceAfter=6,
+    )
+
+    elements.append(Paragraph(ar("تقرير أداء الطالب"), title_style))
+    elements.append(Paragraph(ar("منصة صوتي قلمي — سلطنة عُمان"), normal_style))
     elements.append(Spacer(1, 0.5 * cm))
 
     # معلومات الطالب
     student_info = [
-        ["الاسم", student_data.get("name", "—")],
-        ["الصف", student_data.get("grade", "—")],
-        ["تاريخ التقرير", datetime.now().strftime("%Y-%m-%d")],
+        [ar(student_data.get("name", "—")), ar("الاسم")],
+        [ar(student_data.get("grade", "—")), ar("الصف")],
+        [datetime.now().strftime("%Y-%m-%d"), ar("تاريخ التقرير")],
     ]
 
-    info_table = Table(student_info, colWidths=[4 * cm, 10 * cm])
+    info_table = Table(student_info, colWidths=[10 * cm, 4 * cm])
     info_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#1a5c2a")),
-        ("TEXTCOLOR", (0, 0), (0, -1), colors.white),
+        ("BACKGROUND", (1, 0), (1, -1), colors.HexColor("#1a5c2a")),
+        ("TEXTCOLOR", (1, 0), (1, -1), colors.white),
         ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+        ("FONTNAME", (0, 0), (-1, -1), FONT_REGULAR),
+        ("FONTNAME", (1, 0), (1, -1), FONT_BOLD),
         ("FONTSIZE", (0, 0), (-1, -1), 12),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
         ("PADDING", (0, 0), (-1, -1), 8),
@@ -55,22 +121,33 @@ def generate_student_report(student_data: dict) -> bytes:
     elements.append(Spacer(1, 0.5 * cm))
 
     # جدول التقدم في المهارات
-    elements.append(Paragraph("تقدم المهارات", styles["Heading2"]))
+    elements.append(Paragraph(ar("تقدم المهارات"), heading_style))
 
     skills_data = [
-        ["المهارة", "التقدم", "التقييم"],
-        ["التحدث", f"{student_data.get('speaking_progress', 0):.0f}%",
-         _get_grade(student_data.get('speaking_progress', 0))],
-        ["الكتابة", f"{student_data.get('writing_progress', 0):.0f}%",
-         _get_grade(student_data.get('writing_progress', 0))],
-        ["التعلم الذاتي", f"{student_data.get('self_learning_progress', 0):.0f}%",
-         _get_grade(student_data.get('self_learning_progress', 0))],
+        [ar("التقييم"), ar("التقدم"), ar("المهارة")],
+        [
+            ar(_get_grade(student_data.get("speaking_progress", 0))),
+            f"{student_data.get('speaking_progress', 0):.0f}%",
+            ar("التحدث"),
+        ],
+        [
+            ar(_get_grade(student_data.get("writing_progress", 0))),
+            f"{student_data.get('writing_progress', 0):.0f}%",
+            ar("الكتابة"),
+        ],
+        [
+            ar(_get_grade(student_data.get("self_learning_progress", 0))),
+            f"{student_data.get('self_learning_progress', 0):.0f}%",
+            ar("التعلم الذاتي"),
+        ],
     ]
 
     skills_table = Table(skills_data, colWidths=[5 * cm, 4 * cm, 5 * cm])
     skills_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a5c2a")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), FONT_BOLD),
+        ("FONTNAME", (0, 1), (-1, -1), FONT_REGULAR),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
         ("FONTSIZE", (0, 0), (-1, -1), 11),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
@@ -80,10 +157,26 @@ def generate_student_report(student_data: dict) -> bytes:
     elements.append(skills_table)
     elements.append(Spacer(1, 0.5 * cm))
 
+    # نقاط ونجوم
+    stats_data = [[
+        ar(f"{student_data.get('stars', 0)} نجمة"),
+        ar(f"{student_data.get('points', 0)} نقطة"),
+    ]]
+    stats_table = Table(stats_data, colWidths=[7 * cm, 7 * cm])
+    stats_table.setStyle(TableStyle([
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("FONTNAME", (0, 0), (-1, -1), FONT_BOLD),
+        ("FONTSIZE", (0, 0), (-1, -1), 13),
+        ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#b45309")),
+        ("PADDING", (0, 0), (-1, -1), 6),
+    ]))
+    elements.append(stats_table)
+    elements.append(Spacer(1, 0.5 * cm))
+
     # تعليق المعلم
     if student_data.get("teacher_comment"):
-        elements.append(Paragraph("تعليق المعلم:", styles["Heading2"]))
-        elements.append(Paragraph(student_data["teacher_comment"], styles["Normal"]))
+        elements.append(Paragraph(ar("تعليق المعلم:"), heading_style))
+        elements.append(Paragraph(ar(student_data["teacher_comment"]), normal_style))
 
     doc.build(elements)
     return buffer.getvalue()
