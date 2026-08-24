@@ -6,7 +6,11 @@
 """
 import os
 import json
+import logging
 import urllib.request
+import urllib.error
+
+logger = logging.getLogger("ask_teacher")
 
 MAX_QUESTION_LEN = 300
 
@@ -48,8 +52,16 @@ def answer_student_question(question: str) -> str:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=20) as resp:
             data = json.loads(resp.read())
             return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception:
+    except urllib.error.HTTPError as e:
+        # هذا يكشف السبب الحقيقي غالبًا: مفتاح API غير صالح (403)،
+        # أو تجاوز الحصة (429)، أو اسم نموذج غير موجود (404)، إلخ.
+        # راجع سجلّات Render لرؤية النص الكامل القادم من Google.
+        body = e.read().decode("utf-8", errors="replace") if hasattr(e, "read") else ""
+        logger.error("Gemini HTTPError %s: %s", e.code, body[:500])
+        return "تَعَذَّرَ الِاتِّصَالُ بِالْمُعَلِّمِ الذَّكِيِّ الْآنَ. حَاوِلْ مَرَّةً أُخْرَى بَعْدَ قَلِيلٍ 🌱"
+    except Exception as e:
+        logger.error("Gemini request failed: %s: %s", type(e).__name__, e)
         return "تَعَذَّرَ الِاتِّصَالُ بِالْمُعَلِّمِ الذَّكِيِّ الْآنَ. حَاوِلْ مَرَّةً أُخْرَى بَعْدَ قَلِيلٍ 🌱"
