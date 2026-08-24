@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import evaluation, reports, lessons, students, auth
+from app.routers import evaluation, reports, lessons, students, auth, reviews
 import os
 
 app = FastAPI(
@@ -25,6 +25,7 @@ app.include_router(reports.router, prefix="/api/reports", tags=["التقاري�
 app.include_router(lessons.router, prefix="/api/lessons", tags=["الدروس"])
 app.include_router(students.router, prefix="/api/students", tags=["الطلاب"])
 app.include_router(auth.router, prefix="/api/auth", tags=["الدخول"])
+app.include_router(reviews.router, prefix="/api/reviews", tags=["التقييمات"])
 
 
 @app.get("/api/health")
