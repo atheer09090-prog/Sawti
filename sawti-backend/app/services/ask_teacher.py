@@ -44,7 +44,10 @@ def answer_student_question(question: str) -> str:
         )
         payload = json.dumps({
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.4, "maxOutputTokens": 300},
+            "generationConfig": {
+                "temperature": 0.4, "maxOutputTokens": 500,
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
         }).encode("utf-8")
 
         req = urllib.request.Request(
