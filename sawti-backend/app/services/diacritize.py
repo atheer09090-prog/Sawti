@@ -122,7 +122,10 @@ def diacritize_text(text: str) -> str:
 """ + text
         payload = json.dumps({
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.0, "maxOutputTokens": 2048},
+            "generationConfig": {
+                "temperature": 0.0, "maxOutputTokens": 2048,
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
         }).encode("utf-8")
         req = urllib.request.Request(
             url, data=payload,
