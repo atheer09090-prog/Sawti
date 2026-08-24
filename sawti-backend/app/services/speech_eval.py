@@ -187,7 +187,10 @@ def correct_stt_errors(transcript: str, topic_hint: str = "") -> dict:
         prompt = _STT_CORRECTION_PROMPT_TEMPLATE.format(context=context, text=transcript)
         payload = json.dumps({
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.0, "maxOutputTokens": 2048},
+            "generationConfig": {
+                "temperature": 0.0, "maxOutputTokens": 2048,
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
         }).encode("utf-8")
         req = urllib.request.Request(
             url, data=payload,
