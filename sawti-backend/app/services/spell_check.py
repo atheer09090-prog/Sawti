@@ -384,7 +384,7 @@ def check_spelling_layer2_gemini(text: str, known_wrong_words: set) -> list[dict
     try:
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-2.0-flash:generateContent?key={api_key}"
+            f"gemini-3.6-flash:generateContent?key={api_key}"
         )
         payload = json.dumps({
             "contents": [{"parts": [{"text": _GEMINI_PROMPT + text}]}],
