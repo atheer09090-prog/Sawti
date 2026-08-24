@@ -388,7 +388,10 @@ def check_spelling_layer2_gemini(text: str, known_wrong_words: set) -> list[dict
         )
         payload = json.dumps({
             "contents": [{"parts": [{"text": _GEMINI_PROMPT + text}]}],
-            "generationConfig": {"temperature": 0.0, "maxOutputTokens": 2048},
+            "generationConfig": {
+                "temperature": 0.0, "maxOutputTokens": 2048,
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
         }).encode("utf-8")
         req = urllib.request.Request(
             url, data=payload,
