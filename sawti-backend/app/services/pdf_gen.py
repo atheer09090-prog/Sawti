@@ -11,8 +11,18 @@ from reportlab.lib.enums import TA_RIGHT
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
-import arabic_reshaper
-from bidi.algorithm import get_display
+# ── استيراد اختياري وآمن لمكتبتَي تشكيل النص العربي ──
+# هاتان المكتبتان تُحسِّنان شكل النص العربي داخل الـ PDF فقط (ربط
+# الحروف + الترتيب من اليمين لليسار)، وليستا ضروريتين لعمل بقية
+# المنصة إطلاقًا. لذلك لا نجعل غيابهما (مثلاً بسبب عدم تحديث
+# requirements.txt فعليًا على الخادم) يُسقط تشغيل الخادم بالكامل —
+# نكتفي بإيقاف التشكيل والاعتماد على تسجيل الخط فقط في أسوأ الحالات.
+try:
+    import arabic_reshaper
+    from bidi.algorithm import get_display
+    _RESHAPE_AVAILABLE = True
+except ImportError:
+    _RESHAPE_AVAILABLE = False
 
 # ── تسجيل خط عربي حقيقي (Amiri — نفس خط العناوين في واجهة المنصة) ──
 # دون هذا التسجيل يستخدم ReportLab خطوطًا أساسية (Helvetica) لا تحتوي
@@ -42,7 +52,7 @@ def ar(text) -> str:
     بهذه المعالجة تلقائيًا كما يفعل المتصفح.
     """
     text = str(text) if text is not None else ""
-    if not text:
+    if not text or not _RESHAPE_AVAILABLE:
         return text
     try:
         reshaped = arabic_reshaper.reshape(text)
