@@ -38,7 +38,10 @@ def evaluate_context(text: str) -> list:
         )
         payload = json.dumps({
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 512},
+            "generationConfig": {
+                "temperature": 0.1, "maxOutputTokens": 800,
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
         }).encode("utf-8")
 
         req = urllib.request.Request(
