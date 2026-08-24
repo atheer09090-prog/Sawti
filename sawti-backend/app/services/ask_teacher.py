@@ -45,8 +45,7 @@ def answer_student_question(question: str) -> str:
         payload = json.dumps({
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
-                "temperature": 0.4, "maxOutputTokens": 500,
-                "thinkingConfig": {"thinkingBudget": 0},
+                "temperature": 0.4, "maxOutputTokens": 800,
             },
         }).encode("utf-8")
 
