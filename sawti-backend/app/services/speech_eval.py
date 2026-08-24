@@ -1,190 +1,125 @@
-import os
-import re
-import json
-import urllib.request
-import tempfile
-from typing import Optional
-from groq import Groq
-
-# كلمات عامة شائعة تساعد Whisper على التعرف الصحيح (تُستخدم دائماً كأساس)
-BASE_ARABIC_PROMPT = (
-    "هذا تسجيل صوتي لطالب عُماني في الصف السادس يتحدث باللغة العربية الفصحى بصوت طفل، "
-    "وبلهجة خليجية يُنطق فيها حرف الجيم أحياناً بصوت قريب من القاف (كما في كلمة الجو والجزر). "
-    "ذهبنا، قمنا، رأينا، شاهدنا، جميلة، رائعة، ممتعة، كثيراً، أيضاً، لقد، وقد، فقد، "
-    "أعتقد، في رأيي، لأن، لذلك، أولاً، ثانياً، أخيراً."
-)
-
-# مفردات إضافية خاصة بكل موضوع/درس — كلما كانت أدق كانت دقة النسخ أعلى.
-# نفس الكلمات المستخدمة في صفحات "الكلمات المساعدة" بالفرونت إند (Speaking.tsx / Writing.tsx)،
-# مكرَّرة هنا عمداً لتغذية Whisper مباشرة قبل النسخ (وليس لعرضها للمستخدم).
-TOPIC_VOCAB: dict[str, str] = {
-    "رحلة بحرية": "البحر، السفينة، الشاطئ، الأمواج، السمك، الغوص، السباحة، الرمال، الشمس، المنظر الجميل",
-    "رحلة جبلية": "الجبل، القمة، التسلق، الهواء النقي، الأشجار، المخيم، المشي، الطبيعة، البرودة، المنظر الخلاب",
-    "رحلة جوية": "الطائرة، المطار، الرحلة، السفر، الجواز، الحقائب، السماء، المضيف، المقعد، الهبوط",
-    "صورة دالة على تعلم": "التعلم، المعرفة، المعلم، الكتاب، المهارة، التجربة، الاكتشاف، الفهم، التدريب، النجاح",
-    "الأجهزة الإلكترونية": "الهاتف، الإنترنت، الدراسة، الترفيه، تنظيم الوقت، مفيد، مضر",
-    "البيئة": "البيئة، الأشجار، التلوث، النظافة، إعادة التدوير، المياه، المسؤولية، التعاون، المستقبل، المحافظة",
-    "القراءة": "القراءة، المعرفة، التعلم، الكتب، المكتبة، المعلومات، الفهم، التركيز، الخيال، الثقافة",
-    "ساعة الأرض": "ساعة الأرض، البيئة، المحافظة، الطاقة، الكهرباء، ترشيد، المشاركة، المجتمع، كوكب الأرض، التلوث، الوعي",
-}
-
-
-def _build_prompt(topic_hint: str = "") -> str:
-    """يبني توجيهاً (Prompt) لِـ Whisper: الأساس العام + مفردات الموضوع المطابقة إن وُجدت."""
-    prompt = BASE_ARABIC_PROMPT
-    if topic_hint:
-        clean_hint = re.sub(r"[\u064B-\u065F\u0670]", "", topic_hint)  # إزالة التشكيل قبل المطابقة
-        for key, vocab in TOPIC_VOCAB.items():
-            if key in clean_hint or clean_hint in key:
-                prompt = f"{prompt} كلمات متوقعة في هذا الموضوع: {vocab}."
-                break
-    return prompt
-
-
-# تصحيح ما بعد النسخ لالتباسات صوتية شائعة في اللهجة الخليجية/العُمانية (القاف تُسمع مكان الجيم
-# أحياناً بسبب طريقة النطق المحلية). هذه مطابقة "كلمة كاملة" وليست استبدال حرف عام، لتفادي
-# إفساد كلمات صحيحة تحتوي فعلاً على قاف (مثل: قمنا، قارب، قال).
-#
-# ملاحظة: تعمّدت عدم إضافة بعض الكلمات رغم شيوعها في مواضيعنا لأنها قد تتعارض مع كلمات
-# شائعة جداً وصحيحة بالقاف، فتُفسد أكثر مما تصلح:
-#   - "جبل/الجبل" (رحلة جبلية) → لم تُضَف لأن "قبل" من أكثر الكلمات استخداماً في العربية
-#   - "جوي/جوية/جواً" (رحلة جوية) → لم تُضَف لأن "قوي/قوية/أقوى" شائعة جداً (خصوصاً في دروس الهمزة)
-#   - "جاء" → لم تُضَف لأن "قاء" كلمة حقيقية أيضاً ولا يمكن ترجيح إحداهما بثقة
-PHONETIC_CONFUSIONS: dict[str, str] = {
-    # عام
-    "القو": "الجو", "قو": "جو",
-    "القزر": "الجزر", "قزر": "جزر",
-    "البعر": "البحر", "بعر": "بحر",
-    "قدا": "جدا",
-    "قميل": "جميل", "قميلا": "جميلا", "قميلة": "جميلة",
-    "القميع": "الجميع", "قميع": "جميع",
-    # رحلة بحرية / جبلية (كلمات مفتاحية)
-    "الأمواق": "الأمواج", "أمواق": "أمواج",
-    "الأشقار": "الأشجار", "أشقار": "أشجار",
-    "القزيرة": "الجزيرة", "قزيرة": "جزيرة",
-    # رحلة جوية
-    "القواز": "الجواز", "قواز": "جواز",
-    # الأجهزة الإلكترونية / التعلم
-    "الأقهزة": "الأجهزة", "أقهزة": "أجهزة", "قهاز": "جهاز", "القهاز": "الجهاز",
-    "التقربة": "التجربة", "تقربة": "تجربة",
-    # البيئة / ساعة الأرض / التعبير عن الرأي
-    "المقتمع": "المجتمع", "مقتمع": "مجتمع",
-    # وصف المسجد (كتابة)
-    "المسقد": "المسجد", "مسقد": "مسجد",
-}
-_TASHKEEL_RE = re.compile(r"[\u064B-\u065F\u0670]")
-
-
-_PREFIX_LETTERS = ("و", "ف", "ب", "ك", "ل")
-
-
-def _fix_phonetic_confusions(text: str) -> str:
-    def repl(m: "re.Match[str]") -> str:
-        word = m.group(0)
-        clean = _TASHKEEL_RE.sub("", word)
-        if clean in PHONETIC_CONFUSIONS:
-            return PHONETIC_CONFUSIONS[clean]
-        # حاول إزالة حرف عطف/جر ملتصق بالكلمة (مثل: والجزر، بالجزر) ثم أعِد مطابقتها
-        if len(clean) > 2 and clean[0] in _PREFIX_LETTERS:
-            rest = clean[1:]
-            if rest in PHONETIC_CONFUSIONS:
-                return clean[0] + PHONETIC_CONFUSIONS[rest]
-        return word
-    return re.sub(r"[\w\u0621-\u064A\u064B-\u065F\u0670]+", repl, text)
-
-
-def transcribe_arabic_audio(audio_bytes: bytes, audio_format: str = "wav", topic_hint: str = "") -> str:
-    client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-
-    with tempfile.NamedTemporaryFile(suffix=f".{audio_format}", delete=False) as tmp:
-        tmp.write(audio_bytes)
-        tmp_path = tmp.name
-
-    try:
-        with open(tmp_path, "rb") as audio_file:
-            transcription = client.audio.transcriptions.create(
-                file=(f"recording.{audio_format}", audio_file.read()),
-                model="whisper-large-v3",
-                language="ar",
-                response_format="text",
-                prompt=_build_prompt(topic_hint),
-                temperature=0.0,  # أقل عشوائية = أدق
-            )
-        return _fix_phonetic_confusions(
-            transcription.strip() if isinstance(transcription, str) else transcription.text.strip()
-        )
-    finally:
-        os.unlink(tmp_path)
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# مرحلة مستقلة: تصحيح أخطاء التعرف على الكلام (Speech Recognition Correction)
-# تأتي بين النسخ الصوتي (Whisper) وبين مرحلة التقييم — تُصحِّح فقط الأخطاء
-# التي يبدو بنسبة عالية أنها ناتجة عن خطأ آلي في التعرف على الصوت (وليست
-# أخطاء إملائية/نحوية حقيقية من الطالب)، بالاستعانة بسياق موضوع النشاط.
-# ═══════════════════════════════════════════════════════════════════════
-
-_STT_CORRECTION_PROMPT_TEMPLATE = """أنت خبير في تصحيح أخطاء أنظمة التعرف الآلي على الكلام العربي (Speech-to-Text).
-سيصلك نص ناتج عن تحويل كلام طالب عُماني في الصف السادس إلى نص كتابةً.
-
-مهمتك الوحيدة: تصحيح الكلمات التي يبدو بوضوح أنها أخطاء تعرّف آلي على الصوت
-(كلمة سُمِعت خطأ وتحولت لكلمة أخرى قريبة صوتياً)، وليس تصحيح إملاء الطالب أو أسلوبه.
-
-أمثلة على أخطاء التعرف الآلي على الكلام (وليست أخطاء الطالب):
-جلسنا ← قلسنا، الأسماك ← الأسماء، المسبح ← المصبح، البذور ← الكثور،
-الشاطئ ← الشاتي، رجعنا ← رقعنا، جدي ← قدي، سبحت ← صبحت
-
-يجب عليك الالتزام الصارم بهذه القواعد:
-- لا تُعِد صياغة أي جملة، ولا تجعل النص أكثر فصاحة، ولا تُغيّر أسلوب الطالب.
-- لا تُغيّر ترتيب الجمل، ولا تُضِف كلمات جديدة، ولا تحذف كلمات صحيحة.
-- لا تُصحِّح الأخطاء النحوية الطبيعية للطالب، ولا الأخطاء الإملائية العادية
-  (مثل: هاذا، مدرسه) — هذه ليست من مهمتك هنا إطلاقاً.
-- لا تعتبر اختلاف التشكيل/التنوين/الإعراب/علامات الترقيم خطأً على الإطلاق.
-- صحّح فقط كلمة يبدو بنسبة عالية جداً من الثقة أنها نتيجة سماع خاطئ للصوت،
-  خصوصاً إن كانت كلمة مقترَحة قريبة صوتياً موجودة ضمن سياق موضوع النشاط أدناه.
-- إن لم تكن واثقاً بنسبة عالية من أي تصحيح، لا تُغيّر شيئاً واتركه كما هو.
-
-سياق النشاط (استخدمه للمساعدة في الاستنتاج، لا تكرره في الإجابة):
-{context}
-
-النص الناتج من التعرف الآلي على الكلام:
-\"\"\"{text}\"\"\"
-
-أعد النتيجة بصيغة JSON فقط دون أي نص إضافي، وفق هذا الشكل بالضبط:
-{{"correctedText": "النص كاملاً بعد التصحيح فقط (أو كما هو حرفياً إن لم يوجد أي خطأ تعرّف)", "corrections": [{{"original": "الكلمة كما وردت من STT", "corrected": "الكلمة بعد التصحيح", "reason": "Speech Recognition Error"}}]}}
-
-إن لم تجد أي تصحيح، أعد: {{"correctedText": "{text}", "corrections": []}}
 """
+تشكيل النص العربي باستخدام Gemini API (مجاني)
+"""
+import os
+import json
+import re
+import urllib.request
 
 
-def correct_stt_errors(transcript: str, topic_hint: str = "") -> dict:
-    """
-    مرحلة "Speech Recognition Correction" المستقلة: تصحح فقط أخطاء ناتجة عن
-    التعرف الآلي على الكلام (وليس أخطاء الطالب اللغوية الحقيقية)، بالاستعانة
-    بسياق موضوع النشاط وكلماته المفتاحية. تُعيد النص كما هو دون أي تعديل إن
-    تعذّر الاتصال بـGemini أو لم يكن واثقاً من أي تصحيح.
-    """
-    fallback = {"correctedText": transcript, "corrections": []}
+COMMON: dict[str, str] = {
+    "أنا": "أَنَا", "أنت": "أَنْتَ", "أنتِ": "أَنْتِ", "هو": "هُوَ", "هي": "هِيَ",
+    "نحن": "نَحْنُ", "أنتم": "أَنْتُمْ", "هم": "هُمْ", "هن": "هُنَّ",
+    "في": "فِي", "من": "مِنْ", "إلى": "إِلَى", "على": "عَلَى", "عن": "عَنْ",
+    "مع": "مَعَ", "بين": "بَيْنَ", "عند": "عِنْدَ", "قبل": "قَبْلَ", "بعد": "بَعْدَ",
+    "و": "وَ", "أو": "أَوْ", "لكن": "لَكِنْ", "ثم": "ثُمَّ", "لأن": "لِأَنَّ",
+    "لذلك": "لِذَلِكَ", "حيث": "حَيْثُ", "كما": "كَمَا", "إذا": "إِذَا",
+    "هذا": "هَذَا", "هذه": "هَذِهِ", "ذلك": "ذَلِكَ", "تلك": "تِلْكَ",
+    "لقد": "لَقَدْ", "وقد": "وَقَدْ", "فقد": "فَقَدْ", "قد": "قَدْ",
+    "كان": "كَانَ", "كانت": "كَانَتْ", "كانوا": "كَانُوا",
+    "جدا": "جِدًّا", "جداً": "جِدًّا", "أيضا": "أَيْضًا", "أيضاً": "أَيْضًا",
+    "كثيرا": "كَثِيرًا", "كثيراً": "كَثِيرًا",
+    "بهذه": "بِهَذِهِ", "لهذا": "لِهَذَا",
+    "منها": "مِنْهَا", "منه": "مِنْهُ", "فيها": "فِيهَا", "فيه": "فِيهِ",
+    "قمنا": "قُمْنَا", "ذهبنا": "ذَهَبْنَا", "رأينا": "رَأَيْنَا",
+    "استمتعنا": "اسْتَمْتَعْنَا", "استمتعت": "اسْتَمْتَعْتُ",
+    "شاهدنا": "شَاهَدْنَا", "أكلنا": "أَكَلْنَا", "سافرنا": "سَافَرْنَا",
+    "وصلنا": "وَصَلْنَا", "عدنا": "عُدْنَا", "أحببت": "أَحْبَبْتُ",
+    "بحر": "بَحْرٌ", "البحر": "الْبَحْرُ", "شاطئ": "شَاطِئٌ", "الشاطئ": "الشَّاطِئُ",
+    "أسماك": "أَسْمَاكٌ", "الأسماك": "الْأَسْمَاكُ", "صيد": "صَيْدٌ", "الصيد": "الصَّيْدِ",
+    "قوارب": "قَوَارِبُ", "الموج": "الْمَوْجُ", "أمواج": "أَمْوَاجٌ",
+    "رحلة": "رِحْلَةٌ", "الرحلة": "الرِّحْلَةُ", "رحلتنا": "رِحْلَتُنَا",
+    "بحرية": "بَحْرِيَّةٌ", "جميلة": "جَمِيلَةٌ", "رائعة": "رَائِعَةٌ",
+    "جبل": "جَبَلٌ", "الجبل": "الْجَبَلُ", "جبال": "جِبَالٌ",
+    "غابة": "غَابَةٌ", "أشجار": "أَشْجَارٌ", "شلال": "شَلَّالٌ",
+    "طائرة": "طَائِرَةٌ", "مطار": "مَطَارٌ", "طيران": "طَيَرَانٌ",
+    "مدرسة": "مَدْرَسَةٌ", "معلم": "مُعَلِّمٌ", "طالب": "طَالِبٌ",
+    "كتاب": "كِتَابٌ", "درس": "دَرَسَ", "تعلم": "تَعَلَّمَ",
+}
+
+# حروف الجر التي تجزم الاسم الذي يليها بالكسر دائماً
+PREPOSITIONS = {"في", "من", "إلى", "على", "عن", "مع", "بين", "عند", "قبل", "بعد", "حتى", "منذ", "لدى"}
+
+
+def diacritize_text(text: str) -> str:
+    if not text or not text.strip():
+        return text
     api_key = os.getenv("GEMINI_API_KEY", "")
-    if not api_key or not transcript or not transcript.strip():
-        return fallback
-
-    # نبني سياق النشاط من عنوانه وكلماته المفتاحية (نفس قاموس TOPIC_VOCAB
-    # المستخدم لتوجيه Whisper، حفاظاً على مصدر واحد للمعرفة بمفردات كل موضوع)
-    clean_hint = re.sub(r"[\u064B-\u065F\u0670]", "", topic_hint) if topic_hint else ""
-    context_parts = [f"عنوان النشاط: {topic_hint}"] if topic_hint else ["لا يوجد عنوان نشاط محدد."]
-    for key, vocab in TOPIC_VOCAB.items():
-        if key in clean_hint or clean_hint in key:
-            context_parts.append(f"الكلمات المساعدة لهذا الموضوع: {vocab}")
-            break
-    context = "\n".join(context_parts)
-
+    if not api_key:
+        return _dict_diacritize(text)
     try:
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-2.0-flash:generateContent?key={api_key}"
+            f"gemini-3.6-flash:generateContent?key={api_key}"
         )
-        prompt = _STT_CORRECTION_PROMPT_TEMPLATE.format(context=context, text=transcript)
+        prompt = """أنت خبير متخصص في النحو والصرف العربي، ومهمتك تشكيل النص العربي تشكيلاً كاملاً وصحيحاً وفق قواعد الإعراب الفصيحة.
+
+# القواعد العامة
+1. ضع حركة (فتحة/ضمة/كسرة/سكون/تنوين/شدة) على كل حرف في النص دون استثناء، بما في ذلك الحرف الأخير من كل كلمة.
+2. لا تترك أي حرف بلا حركة إلا حروف المد (الألف، الواو، الياء عند المد) وهمزة الوصل في بداية الكلام.
+3. إذا كان الحرف مشدداً، ضع الشدة مع الحركة المناسبة فوقها أو تحتها.
+
+# قواعد الأفعال
+- الفعل الماضي: مبني على الفتح غالباً (ذَهَبَ، كَتَبَ)، ويُبنى على السكون مع ضمائر الرفع المتحركة (كَتَبْتُ، ذَهَبْنَا)، ويُبنى على الضم مع واو الجماعة (كَتَبُوا).
+- الفعل المضارع: مرفوع بالضمة إذا لم يسبقه ناصب أو جازم (يَكْتُبُ)، منصوب بالفتحة بعد أدوات النصب (لَنْ يَكْتُبَ)، مجزوم بالسكون بعد أدوات الجزم (لَمْ يَكْتُبْ).
+- فعل الأمر: مبني على السكون أو حذف حرف العلة أو حذف النون حسب نوعه (اُكْتُبْ، اِذْهَبْ).
+
+# قواعد الأسماء (الإعراب)
+- المرفوع (فاعل، مبتدأ، خبر، نائب فاعل...): آخره ضمة للمفرد والجمع (الْوَلَدُ، الْمُعَلِّمُونَ)، أو واو لجمع المذكر السالم والأسماء الخمسة، أو ألف للمثنى.
+- المنصوب (مفعول به، حال، تمييز، خبر كان...): آخره فتحة (رَأَيْتُ الْوَلَدَ)، أو ياء لجمع المذكر السالم/المثنى، أو كسرة بدل الفتحة في جمع المؤنث السالم (رَأَيْتُ الْمُعَلِّمَاتِ).
+- المجرور (بعد حرف جر أو مضاف إليه): آخره كسرة (فِي الْبَيْتِ، كِتَابُ الطَّالِبِ)، أو ياء للمثنى وجمع المذكر السالم.
+- التنوين: يُستخدم مع الاسم النكرة غير المضاف وغير المعرف بـ"ال" (كِتَابٌ، كِتَابًا، كِتَابٍ). تنوين الفتح يُكتب على ألف زائدة في آخر الاسم المنصوب غير المنتهي بتاء مربوطة أو همزة (كِتَابًا) لكن لا ألف زائدة إذا انتهى بتاء مربوطة أو همزة أو ألف مقصورة (جِدًّا، مَكْتَبَةً، سَمَاءً).
+- الاسم الممنوع من الصرف: لا يُنوَّن، ويُجَرُّ بالفتحة بدل الكسرة (فِي مَسَاجِدَ، مَعَ أَحْمَدَ).
+
+# حروف ومعانٍ ثابتة
+- الواو العاطفة: تُشكَّل دائماً بالفتح (وَ).
+- "ال" التعريف: اللام ساكنة إن كانت قمرية (الْبَيْتُ)، وتُدغم في الحرف الشمسي فتُحذف حركتها ويُشدَّد الحرف الشمسي (الشَّمْسُ لا الْشمسُ).
+- الضمائر المتصلة: تُشكَّل حسب موقعها (كِتَابُهُ، كِتَابُهَا، رَأَيْتُهُ).
+- لا تضع سكوناً على آخر الكلمة إلا إذا كانت مبنية على السكون فعلاً أو مجزومة أو موقوفاً عليها بالسكون في آخر الجملة.
+
+# كيف تُحدَّد حركة الإعراب حسب موقع الكلمة في الجملة (مهم جداً)
+قبل ما تشكّل أي اسم، حدّد أولاً دوره النحوي في الجملة ثم طبّق الحركة المناسبة:
+- **المبتدأ** (اسم في بداية الجملة الاسمية): مرفوع (الْجَوُّ جَمِيلٌ).
+- **الخبر** (يكمل معنى المبتدأ): مرفوع أيضاً (الْجَوُّ جَمِيلٌ ← "جميل" خبر مرفوع).
+- **الفاعل** (بعد الفعل، يقوم بالفعل): مرفوع (كَتَبَ الْوَلَدُ الدَّرْسَ).
+- **المفعول به** (يقع عليه الفعل): منصوب (كَتَبَ الْوَلَدُ الدَّرْسَ ← "الدرس" مفعول به منصوب).
+- **المضاف والمضاف إليه** (اسمان متتاليان، الأول لا يقبل "ال" ولا التنوين، والثاني مجرور دائماً): كِتَابُ الطَّالِبِ (كتاب: مضاف مرفوع/منصوب/مجرور حسب موقعه من الجملة بلا تنوين، الطالب: مضاف إليه مجرور دائماً).
+- **الاسم بعد حرف جر**: مجرور دائماً بغض النظر عن موقعه في الجملة (ذَهَبْتُ إِلَى الْمَدْرَسَةِ).
+- **اسم إنّ وأخواتها**: منصوب (إِنَّ الْوَلَدَ مُجْتَهِدٌ).
+- **خبر كان وأخواتها**: منصوب (كَانَ الْجَوُّ جَمِيلًا)، بينما اسمها مرفوع (كَانَ الْجَوُّ ← الجو اسم كان مرفوع).
+- **الحال**: منصوب دائماً، ويصف هيئة صاحبه (جَاءَ الْوَلَدُ مُسْرِعًا).
+- **التمييز**: منصوب دائماً (اِشْتَرَيْتُ كِيلُوغْرَامًا سُكَّرًا).
+
+القاعدة العملية: اقرأ الجملة كاملة أولاً، حدّد الفعل والفاعل والمفعول به إن وُجد، ثم حدّد كل مضاف/مضاف إليه وكل اسم بعد حرف جر، وأخيراً طبّق حركة الإعراب على كل كلمة حسب دورها — وليس حسب موقعها الحرفي في الجملة فقط.
+
+# أمثلة توضيحية مُعرَبة
+النص: "ذهب الولد إلى المدرسة صباحا"
+التحليل: ذهب=فعل ماضٍ، الولد=فاعل مرفوع، المدرسة=مجرورة بعد "إلى"، صباحا=ظرف منصوب منوَّن
+التشكيل: "ذَهَبَ الْوَلَدُ إِلَى الْمَدْرَسَةِ صَبَاحًا"
+
+النص: "الطالبات مجتهدات في دراستهن"
+التحليل: الطالبات=مبتدأ مرفوع، مجتهدات=خبر مرفوع، دراستهن=مجرورة بعد "في" ومضافة لضمير
+التشكيل: "الطَّالِبَاتُ مُجْتَهِدَاتٌ فِي دِرَاسَتِهِنَّ"
+
+النص: "لن يذهب المعلمون غدا"
+التحليل: يذهب=فعل مضارع منصوب بـ"لن"، المعلمون=فاعل مرفوع بالواو (جمع مذكر سالم)، غدا=ظرف منصوب منوَّن
+التشكيل: "لَنْ يَذْهَبَ الْمُعَلِّمُونَ غَدًا"
+
+النص: "قرأ الطالب كتاب المعلم في الفصل"
+التحليل: قرأ=فعل ماضٍ، الطالب=فاعل مرفوع، كتاب=مفعول به منصوب وهو مضاف (بلا تنوين لأنه مضاف)، المعلم=مضاف إليه مجرور، الفصل=مجرور بعد "في"
+التشكيل: "قَرَأَ الطَّالِبُ كِتَابَ الْمُعَلِّمِ فِي الْفَصْلِ"
+
+النص: "كان الجو جميلا جدا"
+التحليل: كان=فعل ماضٍ ناقص، الجو=اسم كان مرفوع، جميلا=خبر كان منصوب منوَّن، جدا=تابع منصوب
+التشكيل: "كَانَ الْجَوُّ جَمِيلًا جِدًّا"
+
+# تعليمات الإخراج
+- أعد النص المُشكَّل فقط، دون أي شرح أو مقدمة أو علامات اقتباس.
+- حافظ على علامات الترقيم والفواصل كما هي دون تشكيل.
+- لا تُغيّر أي كلمة أو ترتيب في النص الأصلي، فقط أضف التشكيل.
+
+النص المطلوب تشكيله:
+""" + text
         payload = json.dumps({
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.0, "maxOutputTokens": 2048},
@@ -196,374 +131,48 @@ def correct_stt_errors(transcript: str, topic_hint: str = "") -> dict:
         )
         with urllib.request.urlopen(req, timeout=20) as resp:
             data = json.loads(resp.read())
-            raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            raw = re.sub(r"^```(json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
-            parsed = json.loads(raw)
-
-        corrected_text = parsed.get("correctedText", "").strip()
-        corrections = parsed.get("corrections", []) or []
-
-        # حماية إضافية: إن غيّر Gemini عدد الكلمات بشكل كبير (احتمال إعادة صياغة
-        # مخالفة للتعليمات)، نتجاهل تصحيحه بالكامل حفاظاً على أمانة كلام الطالب.
-        if not corrected_text:
-            return fallback
-        orig_wc, new_wc = len(transcript.split()), len(corrected_text.split())
-        if orig_wc and abs(new_wc - orig_wc) / orig_wc > 0.15:
-            print(f"[speech_eval] STT correction rejected: word count changed too much "
-                  f"({orig_wc} -> {new_wc})")
-            return fallback
-
-        clean_corrections = [
-            {"original": c.get("original", ""), "corrected": c.get("corrected", ""),
-             "reason": "Speech Recognition Error"}
-            for c in corrections if c.get("original") and c.get("corrected")
-        ]
-        return {"correctedText": corrected_text, "corrections": clean_corrections}
-    except Exception as ex:
-        print(f"[speech_eval] STT correction stage failed: {type(ex).__name__}: {ex}")
-        return fallback
+            result = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            return result if result else _dict_diacritize(text)
+    except Exception:
+        return _dict_diacritize(text)
 
 
-def evaluate_speaking(transcript: str, reference_text: Optional[str] = None, lesson_id: str = "") -> dict:
-    if not transcript or len(transcript.strip()) < 5:
-        empty = {
-            "overall": 0, "word_count": 0, "transcript": transcript,
-            "feedback": "لم يتم التعرف على الكلام. يرجى المحاولة مجدداً.",
-        }
-        if lesson_id == "opinion":
-            empty.update({"opinion_clarity": 0, "reasons_score": 0, "phrases_score": 0, "coherence_score": 0, "conclusion_score": 0})
-        elif lesson_id == "earth":
-            empty.update({"understanding_score": 0, "goal_score": 0, "vocabulary_score": 0, "coherence_score": 0, "opinion_score": 0})
+def _dict_diacritize(text: str) -> str:
+    """
+    تشكيل احتياطي (fallback) يُستخدم فقط عند غياب مفتاح API أو فشل الطلب.
+    يعتمد على قاموس ثابت + قواعد استدلالية بسيطة حسب موقع الكلمة
+    (heuristics)، وليس تحليلاً نحوياً كاملاً. لا يضمن دقة 100% في
+    الحالات المعقدة (كالمضاف/المضاف إليه المتداخل أو الجمل المركبة).
+    """
+    words = text.split()
+    result = []
+    for i, word in enumerate(words):
+        clean = word.strip(".,،؟!؛:«»")
+        suffix = word[len(clean):]
+
+        if clean in COMMON:
+            diacritized = COMMON[clean]
         else:
-            empty.update({"pronunciation": 0, "sentence_structure": 0, "diacritics": 0, "grammar": 0})
-        return empty
+            diacritized = clean
+            prev_clean = words[i - 1].strip(".,،؟!؛:«»") if i > 0 else ""
+            next_clean = words[i + 1].strip(".,،؟!؛:«»") if i + 1 < len(words) else ""
 
-    if lesson_id == "opinion":
-        return _evaluate_opinion_speaking(transcript)
-    if lesson_id == "earth":
-        return _evaluate_comprehension_speaking(transcript)
+            # قاعدة 1: الاسم بعد حرف جر → مجرور (كسرة في الآخر)
+            if prev_clean in PREPOSITIONS and diacritized and diacritized[-1] not in "ًٌٍَُِّْ":
+                if diacritized.startswith("ال"):
+                    diacritized += "ِ"
+                else:
+                    diacritized += "ٍ"  # تنوين كسر للنكرة
 
-    words = transcript.split()
-    word_count = len(words)
+            # قاعدة 2: مضاف + مضاف إليه (اسمان متجاوران، الثاني معرف بـ"ال")
+            # الكلمة الحالية (مضاف) لا تأخذ تنوين ولا "ال"، والتالية (مضاف إليه) مجرورة
+            elif next_clean.startswith("ال") and not clean.startswith("ال") and clean not in PREPOSITIONS:
+                # لا نضيف تنوين على المضاف؛ نتركه كما هو إن لم نعرف حركته
+                pass
 
-    pronunciation_score = _evaluate_pronunciation(transcript, reference_text)
-    sentence_score      = _evaluate_sentence_structure(transcript, word_count)
-    diacritics_score    = _evaluate_diacritics(transcript)
-    grammar_score       = _evaluate_grammar(transcript)
+        result.append(diacritized + suffix)
 
-    overall = round(
-        (pronunciation_score * 0.35) +
-        (sentence_score      * 0.25) +
-        (diacritics_score    * 0.20) +
-        (grammar_score       * 0.20)
-    )
-
-    return {
-        "pronunciation": pronunciation_score,
-        "sentence_structure": sentence_score,
-        "diacritics": diacritics_score,
-        "grammar": grammar_score,
-        "overall": overall,
-        "word_count": word_count,
-        "transcript": transcript,
-        "feedback": _generate_feedback(overall, pronunciation_score, sentence_score),
-        "strengths": _speaking_strengths(pronunciation_score, sentence_score, diacritics_score, grammar_score, word_count),
-        "suggestions": _speaking_suggestions(pronunciation_score, sentence_score, diacritics_score, grammar_score, word_count, transcript),
-    }
-
-
-def _speaking_strengths(pronunciation: int, sentence: int, diacritics: int, grammar: int, word_count: int) -> list:
-    s = []
-    if pronunciation >= 80: s.append("🗣️ نُطْقُكَ وَاضِحٌ وَمَفْهُومٌ تَمَامًا")
-    if sentence >= 80:      s.append("📝 جُمَلُكَ مُرَتَّبَةٌ وَمُتَسَلْسِلَةٌ بِشَكْلٍ جَيِّدٍ")
-    if diacritics >= 80:    s.append("🔤 اسْتَخْدَمْتَ التَّشْكِيلَ الصَّحِيحَ فِي مُعْظَمِ الْكَلِمَاتِ")
-    if grammar >= 80:       s.append("✅ تَرْكِيبُكَ النَّحْوِيُّ سَلِيمٌ")
-    if word_count >= 40:    s.append("💬 تَحَدَّثْتَ بِإِسْهَابٍ وَتَفْصِيلٍ جَيِّدٍ")
-    if not s:
-        s.append("👍 أَكْمَلْتَ النَّشَاطَ بِنَجَاحٍ — اسْتَمِرَّ فِي الْمُحَاوَلَةِ!")
-    return s
-
-
-def _speaking_suggestions(pronunciation: int, sentence: int, diacritics: int, grammar: int, word_count: int, transcript: str) -> list:
-    tips = []
-    if pronunciation < 80:
-        tips.append("حَاوِلْ نُطْقَ الْكَلِمَاتِ الطَّوِيلَةِ بِبُطْءٍ أَكْبَرَ وَوُضُوحٍ")
-    if sentence < 80:
-        tips.append("اسْتَخْدِمْ أَدَوَاتِ رَبْطٍ مِثْلَ (ثُمَّ، بَعْدَ ذَلِكَ، لِذَلِكَ) لِتَحْسِينِ تَسَلْسُلِ جُمَلِكَ")
-    if diacritics < 80:
-        tips.append("انْتَبِهْ لِتَشْكِيلِ أَوَاخِرِ الْكَلِمَاتِ (الْحَرَكَاتِ) أَثْنَاءَ النُّطْقِ")
-    if grammar < 80:
-        tips.append("رَاجِعْ تَرْكِيبَ الْجُمْلَةِ وَتَأَكَّدْ مِنَ التَّطَابُقِ بَيْنَ الْفِعْلِ وَالْفَاعِلِ")
-    if word_count < 20:
-        tips.append("حَاوِلْ التَّحَدُّثَ لِفَتْرَةٍ أَطْوَلَ لِإِثْرَاءِ حَدِيثِكَ بِمَزِيدٍ مِنَ التَّفَاصِيلِ")
-    if not tips:
-        tips.append("أَدَاؤُكَ مُمْتَازٌ — اسْتَمِرَّ عَلَى هَذَا الْمُسْتَوَى!")
-    return tips
-
-
-# ═══════════════ تقييم مخصَّص لنشاط "التعبير عن الرأي" ═══════════════
-# يركّز على: وضوح الرأي، وجود أسباب مقنعة، استخدام عبارات إبداء الرأي،
-# ترابط الأفكار، ووجود خاتمة — وليس على عدد الكلمات فقط.
-
-_OPINION_OPENERS = ["أعتقد", "برأيي", "في رأيي", "من وجهة نظري", "أرى أن", "أظن"]
-_REASON_MARKERS  = ["لأن", "لأنّ", "بسبب", "وذلك لأن", "نظراً لـ", "نظراً ل"]
-_CONNECTORS      = ["أولاً", "ثانياً", "ثالثاً", "بعد ذلك", "أيضاً", "بالإضافة إلى ذلك", "كذلك", "علاوة على ذلك", "من ناحية أخرى"]
-_CONCLUDERS      = ["لذلك", "لهذا", "وأخيراً", "أخيراً", "في الختام", "وفي الختام", "وباختصار", "خلاصة القول", "إذن"]
-
-
-def _evaluate_opinion_speaking(transcript: str) -> dict:
-    words = transcript.split()
-    word_count = len(words)
-    last_third = transcript[int(len(transcript) * 0.6):]  # الجزء الأخير من الحديث، لفحص الخاتمة
-
-    # ١) وضوح الرأي: وجود عبارة إبداء رأي صريحة + طول كافٍ للتعبير
-    openers_found = [p for p in _OPINION_OPENERS if p in transcript]
-    clarity_score = 40
-    if openers_found: clarity_score += 40
-    if word_count >= 15: clarity_score += 20
-    clarity_score = min(100, clarity_score)
-
-    # ٢) الأسباب: كل "لأن" أو ما شابهها تُحسب سبباً داعماً للرأي
-    reasons_found = sum(transcript.count(m) for m in _REASON_MARKERS)
-    if reasons_found == 0:   reasons_score = 30
-    elif reasons_found == 1: reasons_score = 70
-    else:                    reasons_score = 100
-
-    # ٣) عبارات إبداء الرأي (أعتقد/في رأيي/لأن/لذلك...) — عدد العبارات المميزة المستخدمة
-    phrase_pool = _OPINION_OPENERS + _REASON_MARKERS + _CONCLUDERS
-    phrases_used = sorted(set(p for p in phrase_pool if p in transcript))
-    phrases_score = min(100, 30 + len(phrases_used) * 20)
-
-    # ٤) ترابط الأفكار: أدوات ربط/تسلسل + وجود أكثر من جملة (فواصل/نقاط)
-    connectors_found = sum(1 for c in _CONNECTORS if c in transcript)
-    coherence_score = 40 + min(40, connectors_found * 15)
-    if "،" in transcript or "." in transcript:
-        coherence_score += 20
-    coherence_score = min(100, coherence_score)
-
-    # ٥) الخاتمة: هل ظهرت عبارة ختامية في الجزء الأخير من الحديث؟
-    concluders_found = [c for c in _CONCLUDERS if c in last_third]
-    conclusion_score = 100 if concluders_found else (50 if any(c in transcript for c in _CONCLUDERS) else 20)
-
-    overall = round(
-        (clarity_score    * 0.25) +
-        (reasons_score    * 0.30) +
-        (phrases_score    * 0.15) +
-        (coherence_score  * 0.15) +
-        (conclusion_score * 0.15)
-    )
-
-    return {
-        "opinion_clarity": clarity_score,
-        "reasons_score": reasons_score,
-        "reasons_count": reasons_found,
-        "phrases_score": phrases_score,
-        "phrases_used": phrases_used,
-        "coherence_score": coherence_score,
-        "conclusion_score": conclusion_score,
-        "overall": overall,
-        "word_count": word_count,
-        "transcript": transcript,
-        "feedback": _generate_opinion_feedback(overall, reasons_found, bool(openers_found), bool(concluders_found)),
-        "strengths": _opinion_strengths(clarity_score, reasons_found, coherence_score, bool(concluders_found)),
-        "suggestions": _opinion_suggestions(bool(openers_found), reasons_found, bool(concluders_found), coherence_score),
-    }
-
-
-def _opinion_strengths(clarity_score: int, reasons_found: int, coherence_score: int, has_conclusion: bool) -> list:
-    s = []
-    if clarity_score >= 80:   s.append("🗣️ عبّرت عن رأيك بوضوح منذ البداية")
-    if reasons_found >= 2:    s.append("📌 دعمت رأيك بسببين أو أكثر — إقناعٌ جيدٌ")
-    elif reasons_found == 1:  s.append("📌 دعمت رأيك بسبب واحد")
-    if coherence_score >= 80: s.append("🔗 أفكارك مترابطة ومتسلسلة بشكل منطقي")
-    if has_conclusion:        s.append("🏁 ختمت حديثك بخاتمة مناسبة")
-    if not s:
-        s.append("👍 أكملت النشاط بنجاح — استمر في المحاولة!")
-    return s
-
-
-def _opinion_suggestions(has_opener: bool, reasons_found: int, has_conclusion: bool, coherence_score: int) -> list:
-    tips = []
-    if not has_opener:
-        tips.append("ابدأ حديثك بعبارة واضحة مثل «أعتقد أن...» أو «في رأيي...»")
-    if reasons_found == 0:
-        tips.append("أضِف سبباً واحداً على الأقل يدعم رأيك باستخدام «لأن...»")
-    elif reasons_found == 1:
-        tips.append("حاول إضافة سبب ثانٍ ليصبح رأيك أكثر إقناعاً")
-    if coherence_score < 80:
-        tips.append("استخدم أدوات ربط مثل (أولاً، بالإضافة إلى ذلك) لتنظيم أفكارك")
-    if not has_conclusion:
-        tips.append("اختم حديثك بجملة قصيرة تلخّص رأيك، مثل «لذلك أعتقد...»")
-    if not tips:
-        tips.append("أداؤك ممتاز — استمر على هذا المستوى!")
-    return tips
-
-
-def _generate_opinion_feedback(overall: int, reasons_found: int, has_opener: bool, has_conclusion: bool) -> str:
-    if overall >= 85:
-        return "ممتاز! عبّرت عن رأيك بوضوح ودعمته بأسباب مقنعة، وأنهيت حديثك بخاتمة مناسبة."
-    tips = []
-    if not has_opener:
-        tips.append("ابدأ حديثك بعبارة واضحة مثل «أعتقد أن...» أو «في رأيي...»")
-    if reasons_found == 0:
-        tips.append("أضِف سبباً واحداً على الأقل يدعم رأيك باستخدام «لأن...»")
-    elif reasons_found == 1:
-        tips.append("حاول إضافة سبب ثانٍ ليصبح رأيك أكثر إقناعاً")
-    if not has_conclusion:
-        tips.append("اختم حديثك بجملة قصيرة تلخّص رأيك، مثل «لذلك أعتقد...»")
-    if not tips:
-        return "جيد جداً! رأيك واضح ومنظّم، استمر في التدريب لتطوير أسلوبك أكثر."
-    return "جيد! " + " — ".join(tips)
-
-
-def _evaluate_pronunciation(transcript: str, reference: Optional[str]) -> int:
-    if not reference:
-        arabic_chars = len(re.findall(r'[\u0600-\u06FF]', transcript))
-        total_chars  = max(len(transcript.replace(" ", "")), 1)
-        return min(100, int((arabic_chars / total_chars) * 100))
-    ref_words   = set(reference.split())
-    trans_words = set(transcript.split())
-    if not ref_words:
-        return 70
-    overlap = len(ref_words & trans_words) / len(ref_words)
-    return min(100, int(overlap * 100))
-
-
-def _evaluate_sentence_structure(transcript: str, word_count: int) -> int:
-    score = 50
-    if word_count >= 20:   score += 20
-    elif word_count >= 10: score += 10
-    connectors = ['ثم','لأن','لذلك','أما','بينما','حيث','كما','أيضاً','و','لكن']
-    found = sum(1 for c in connectors if c in transcript)
-    score += min(20, found * 5)
-    if '.' in transcript or '،' in transcript:
-        score += 10
-    return min(100, score)
-
-
-def _evaluate_diacritics(transcript: str) -> int:
-    total_chars = len(re.findall(r'[\u0600-\u06FF]', transcript))
-    diacritics  = len(re.findall(r'[\u064B-\u065F]', transcript))
-    if total_chars == 0:
-        return 50
-    return min(100, int((diacritics / total_chars) * 200))
-
-
-def _evaluate_grammar(transcript: str) -> int:
-    score = 60
-    verb_patterns = ['يعمل','يذهب','يقول','يكتب','يقرأ','كان','أصبح']
-    if any(v in transcript for v in verb_patterns):
-        score += 15
-    al_count = len(re.findall(r'\bال\w+', transcript))
-    score += min(15, al_count * 3)
-    common_errors = ['هاذا','هاذه','ذالك']
-    score -= sum(1 for e in common_errors if e in transcript) * 5
-    return max(0, min(100, score))
-
-
-def _generate_feedback(overall: int, pronunciation: int, structure: int) -> str:
-    if overall >= 85: return "ممتاز! أداؤك رائع في التحدث باللغة العربية."
-    elif overall >= 70: return "جيد جداً! يمكنك تحسين النطق أكثر بالتدريب المستمر."
-    elif overall >= 55: return "جيد! ركّز على بناء الجمل الكاملة وإضافة أدوات الربط."
-    else: return "استمر في التدريب! حاول التحدث بجمل أطول وأكثر وضوحاً."
-
-
-# ═══════════════ تقييم مخصَّص لنشاط "قراءة منشور توعوي" (فهم واستيعاب) ═══════════════
-# يركّز على: فهم الفكرة، توضيح الهدف، مفردات الموضوع، ترابط الأفكار، ورأي/اقتراح مناسب.
-
-_EARTH_TOPIC_WORDS = ["ساعة الأرض", "البيئة", "المحافظة", "الطاقة", "الكهرباء", "ترشيد",
-                      "المشاركة", "المجتمع", "كوكب الأرض", "المستقبل", "التلوث", "الوعي",
-                      "أضواء", "إطفاء", "انطفاء", "استهلاك"]
-_GOAL_MARKERS = ["الهدف", "من أجل", "لكي", "حتى", "بهدف", "تهدف", "الغرض"]
-_OPINION_SUGGESTION_MARKERS = ["أعتقد", "أرى", "أقترح", "يجب", "من المهم", "ينبغي",
-                               "لذلك", "أنصح", "من رأيي", "في رأيي"]
-
-
-def _evaluate_comprehension_speaking(transcript: str) -> dict:
-    words = transcript.split()
-    word_count = len(words)
-
-    # ١) فهم الفكرة الرئيسة: وجود كلمات الموضوع الأساسية
-    topic_hits = sum(1 for w in _EARTH_TOPIC_WORDS if w in transcript)
-    understanding_score = min(100, 30 + topic_hits * 18)
-
-    # ٢) توضيح الهدف من المنشور
-    has_goal_marker = any(m in transcript for m in _GOAL_MARKERS)
-    goal_score = 85 if (has_goal_marker and topic_hits >= 1) else (55 if topic_hits >= 1 else 25)
-
-    # ٣) مفردات مرتبطة بالموضوع (تنوّع الكلمات المستخدمة من قاموس الموضوع)
-    vocabulary_score = min(100, 20 + topic_hits * 15)
-
-    # ٤) ترابط الأفكار وتسلسلها
-    connectors_found = sum(1 for c in _CONNECTORS if c in transcript)
-    coherence_score = 40 + min(40, connectors_found * 15)
-    if "،" in transcript or "." in transcript:
-        coherence_score += 20
-    coherence_score = min(100, coherence_score)
-
-    # ٥) رأي أو اقتراح مناسب في نهاية الحديث
-    has_opinion = any(m in transcript for m in _OPINION_SUGGESTION_MARKERS)
-    opinion_score = 90 if has_opinion else 30
-
-    overall = round(
-        (understanding_score * 0.30) +
-        (goal_score          * 0.20) +
-        (vocabulary_score    * 0.20) +
-        (coherence_score     * 0.15) +
-        (opinion_score       * 0.15)
-    )
-
-    return {
-        "understanding_score": understanding_score,
-        "goal_score": goal_score,
-        "vocabulary_score": vocabulary_score,
-        "coherence_score": coherence_score,
-        "opinion_score": opinion_score,
-        "overall": overall,
-        "word_count": word_count,
-        "transcript": transcript,
-        "feedback": _generate_comprehension_feedback(overall, topic_hits, has_goal_marker, has_opinion),
-        "strengths": _comprehension_strengths(understanding_score, goal_score, coherence_score, has_opinion),
-        "suggestions": _comprehension_suggestions(topic_hits, has_goal_marker, has_opinion, coherence_score),
-    }
-
-
-def _comprehension_strengths(understanding_score: int, goal_score: int, coherence_score: int, has_opinion: bool) -> list:
-    s = []
-    if understanding_score >= 80: s.append("🧠 فهمت فكرة المنشور الرئيسة بوضوح")
-    if goal_score >= 80:          s.append("🎯 وضّحت الهدف من المنشور بدقة")
-    if coherence_score >= 80:     s.append("🔗 أفكارك مترابطة ومتسلسلة بشكل منطقي")
-    if has_opinion:               s.append("🌱 قدّمت رأياً أو اقتراحاً مناسباً")
-    if not s:
-        s.append("👍 أكملت النشاط بنجاح — استمر في المحاولة!")
-    return s
-
-
-def _comprehension_suggestions(topic_hits: int, has_goal: bool, has_opinion: bool, coherence_score: int) -> list:
-    tips = []
-    if topic_hits == 0:
-        tips.append("استخدم كلمات من المنشور نفسه (مثل: ساعة الأرض، البيئة، الطاقة) لتُظهر فهمك للفكرة")
-    if not has_goal:
-        tips.append("وضّح الهدف من المنشور، مثلاً: «الهدف من هذا المنشور هو...»")
-    if coherence_score < 80:
-        tips.append("استخدم أدوات ربط لتنظيم أفكارك بشكل أوضح")
-    if not has_opinion:
-        tips.append("اختم حديثك برأيك أو اقتراحك، مثل: «أعتقد أن...» أو «أقترح أن...»")
-    if not tips:
-        tips.append("أداؤك ممتاز — استمر على هذا المستوى!")
-    return tips
-
-
-def _generate_comprehension_feedback(overall: int, topic_hits: int, has_goal: bool, has_opinion: bool) -> str:
-    if overall >= 85:
-        return "ممتاز! فهمت فكرة المنشور ووضّحت هدفه، واستخدمت مفردات مناسبة، وختمت برأي واضح."
-    tips = []
-    if topic_hits == 0:
-        tips.append("استخدم كلمات من المنشور نفسه (مثل: ساعة الأرض، البيئة، الطاقة) لتُظهر فهمك للفكرة")
-    if not has_goal:
-        tips.append("وضّح الهدف من المنشور، مثلاً: «الهدف من هذا المنشور هو...»")
-    if not has_opinion:
-        tips.append("اختم حديثك برأيك أو اقتراحك، مثل: «أعتقد أن...» أو «أقترح أن...»")
-    if not tips:
-        return "جيد جداً! استمر في تنظيم أفكارك بهذا الشكل الواضح."
-    return "جيد! " + " — ".join(tips)
+    output = " ".join(result)
+    if output and output[-1] not in ".،؟!؛:":
+        output += "."
+    return output
