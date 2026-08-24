@@ -50,7 +50,7 @@ def diacritize_text(text: str) -> str:
     try:
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-2.0-flash:generateContent?key={api_key}"
+            f"gemini-3.6-flash:generateContent?key={api_key}"
         )
         prompt = """أنت خبير متخصص في النحو والصرف العربي، ومهمتك تشكيل النص العربي تشكيلاً كاملاً وصحيحاً وفق قواعد الإعراب الفصيحة.
 
