@@ -40,7 +40,7 @@ def answer_student_question(question: str) -> str:
     try:
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-2.0-flash:generateContent?key={api_key}"
+            f"gemini-3.6-flash:generateContent?key={api_key}"
         )
         payload = json.dumps({
             "contents": [{"parts": [{"text": prompt}]}],
