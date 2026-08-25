@@ -14,6 +14,20 @@ logger = logging.getLogger("ask_teacher")
 
 MAX_QUESTION_LEN = 300
 
+# علامات نهاية الجملة العربية والعامة المستخدمة لقصّ أي رد مقطوع
+_SENTENCE_ENDERS = ("۔", "؟", "!", ".", "،؟", ":")
+
+
+def _trim_to_last_complete_sentence(text: str) -> str:
+    best_cut = -1
+    for ender in _SENTENCE_ENDERS:
+        idx = text.rfind(ender)
+        if idx > best_cut:
+            best_cut = idx
+    if best_cut == -1:
+        return text  # لا توجد علامة نهاية واضحة — نُعيد النص كما هو
+    return text[: best_cut + 1].strip()
+
 
 def answer_student_question(question: str) -> str:
     question = (question or "").strip()
@@ -46,7 +60,7 @@ def answer_student_question(question: str) -> str:
         "الإجابة في منتصف جملة أبدًا — إن لم تتّسع المساحة فاختصر الفكرة "
         "كاملة بدل قطعها.\n"
         "5. اذكر مثالاً واحدًا قصيرًا فقط إن كان يساعد على الفهم.\n"
-        "6. لا تتجاوز إجابتك 3 إلى 4 جمل قصيرة إجمالًا.\n"
+        "6. لا تتجاوز إجابتك جملتين قصيرتين اثنتين كحد أقصى — لا أكثر.\n"
         "7. إذا كان السؤال غير مفهوم أو خارج نطاق اللغة العربية تمامًا، "
         "اطلب من الطالب إعادة صياغته بجملة واحدة فقط.\n\n"
         f"سؤال الطالب: {question}\n\n"
@@ -61,7 +75,12 @@ def answer_student_question(question: str) -> str:
         payload = json.dumps({
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
-                "temperature": 0.2, "maxOutputTokens": 1024,
+                # نرفع الحد الأقصى للتوكنات بشكل كبير جدًا هنا تحديدًا
+                # لأن هذا الإصدار من النموذج يستهلك جزءًا غير ظاهر من
+                # نفس الحصة في "تفكير" داخلي قبل كتابة الإجابة، ولا توجد
+                # طريقة مؤكدة لتعطيل ذلك (المحاولة السابقة برفض 400).
+                # رفع الحصة الكلية هو أضمن حل متاح حاليًا.
+                "temperature": 0.2, "maxOutputTokens": 4096,
             },
         }).encode("utf-8")
 
@@ -70,16 +89,23 @@ def answer_student_question(question: str) -> str:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=25) as resp:
             data = json.loads(resp.read())
             candidate = data["candidates"][0]
             finish_reason = candidate.get("finishReason", "")
+            parts = candidate.get("content", {}).get("parts", [])
+            text = parts[0]["text"].strip() if parts else ""
+
             if finish_reason and finish_reason not in ("STOP",):
-                # يساعد هذا السطر على تشخيص أي قطع مستقبلي في الإجابة
-                # (مثلاً MAX_TOKENS يعني أن الإجابة قُطعت لضيق المساحة)
                 logger.warning("Gemini finishReason=%s for question: %s", finish_reason, question[:80])
-            text = candidate["content"]["parts"][0]["text"].strip()
-            return text
+
+            if finish_reason == "MAX_TOKENS" and text:
+                # شبكة أمان: إن كانت الإجابة مقطوعة رغم كل شيء، نعرض
+                # آخر جملة مكتملة فقط بدل عرض نص منتهٍ في منتصف كلمة —
+                # أفضل جملة واحدة صحيحة من جملتين إحداهما مبتورة.
+                text = _trim_to_last_complete_sentence(text)
+
+            return text or "لم أتمكن من صياغة إجابة واضحة. أعد صياغة سؤالك بطريقة أخرى من فضلك."
     except urllib.error.HTTPError as e:
         # هذا يكشف السبب الحقيقي غالبًا: مفتاح API غير صالح (403)،
         # أو تجاوز الحصة (429)، أو اسم نموذج غير موجود (404)، إلخ.
