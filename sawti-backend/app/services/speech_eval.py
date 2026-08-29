@@ -77,18 +77,36 @@ _TASHKEEL_RE = re.compile(r"[\u064B-\u065F\u0670]")
 
 _PREFIX_LETTERS = ("و", "ف", "ب", "ك", "ل")
 
+# التباسات صوتية مرتبطة بموضوع مُحدَّد فقط (وليست عامة)، لأن الكلمة الملتبَسة
+# صحيحة ومختلفة المعنى في مواضيع أخرى، فلا يصح استبدالها إلا ضمن سياق موضوعها.
+# مثال: "الأموال" كلمة صحيحة تماماً (بمعنى المال)، لكنها في سياق "رحلة بحرية"
+# غالباً ما تكون نتيجة سماع خاطئ لكلمة "الأمواج".
+TOPIC_PHONETIC_CONFUSIONS: dict[str, dict[str, str]] = {
+    "رحلة بحرية": {
+        "الأموال": "الأمواج", "أموال": "أمواج",
+    },
+}
 
-def _fix_phonetic_confusions(text: str) -> str:
+
+def _fix_phonetic_confusions(text: str, topic_hint: str = "") -> str:
+    local_confusions = dict(PHONETIC_CONFUSIONS)
+    if topic_hint:
+        clean_hint = re.sub(r"[\u064B-\u065F\u0670]", "", topic_hint)
+        for key, confusions in TOPIC_PHONETIC_CONFUSIONS.items():
+            if key in clean_hint or clean_hint in key:
+                local_confusions.update(confusions)
+                break
+
     def repl(m: "re.Match[str]") -> str:
         word = m.group(0)
         clean = _TASHKEEL_RE.sub("", word)
-        if clean in PHONETIC_CONFUSIONS:
-            return PHONETIC_CONFUSIONS[clean]
+        if clean in local_confusions:
+            return local_confusions[clean]
         # حاول إزالة حرف عطف/جر ملتصق بالكلمة (مثل: والجزر، بالجزر) ثم أعِد مطابقتها
         if len(clean) > 2 and clean[0] in _PREFIX_LETTERS:
             rest = clean[1:]
-            if rest in PHONETIC_CONFUSIONS:
-                return clean[0] + PHONETIC_CONFUSIONS[rest]
+            if rest in local_confusions:
+                return clean[0] + local_confusions[rest]
         return word
     return re.sub(r"[\w\u0621-\u064A\u064B-\u065F\u0670]+", repl, text)
 
@@ -111,7 +129,8 @@ def transcribe_arabic_audio(audio_bytes: bytes, audio_format: str = "wav", topic
                 temperature=0.0,  # أقل عشوائية = أدق
             )
         return _fix_phonetic_confusions(
-            transcription.strip() if isinstance(transcription, str) else transcription.text.strip()
+            transcription.strip() if isinstance(transcription, str) else transcription.text.strip(),
+            topic_hint=topic_hint,
         )
     finally:
         os.unlink(tmp_path)
