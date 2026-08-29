@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: sawti-qalami-backend
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: WHISPER_MODEL
+        value: base
+      - key: ENVIRONMENT
+        value: production
+      - key: ALLOWED_ORIGINS
+        value: https://sawtiqalam-pytdgr9g.manus.space
