@@ -39,8 +39,13 @@ def evaluate_context(text: str) -> list:
         payload = json.dumps({
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
-                "temperature": 0.1, "maxOutputTokens": 800,
-                "thinkingConfig": {"thinkingBudget": 0},
+                # ملاحظة مهمة (اكتُشفت فعلياً في الإنتاج): إرسال "thinkingConfig":
+                # {"thinkingBudget": 0} لهذا الإصدار من النموذج (gemini-3.6-flash)
+                # يُرجع HTTP 400 Bad Request دائماً — الحقل قديم/غير مدعوم بهذا
+                # الشكل في هذا الإصدار. الحل المُثبَت (نفس الحل المستخدم في
+                # ask_teacher.py): عدم إرسال thinkingConfig إطلاقاً، ورفع
+                # الحصة القصوى للتوكنات لتعويض الاستهلاك الداخلي غير الظاهر.
+                "temperature": 0.1, "maxOutputTokens": 1600,
             },
         }).encode("utf-8")
 

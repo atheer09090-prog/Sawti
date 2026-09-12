@@ -4,6 +4,7 @@ import json
 import time
 import logging
 import urllib.request
+import urllib.error
 import tempfile
 from typing import Optional
 from groq import Groq
@@ -272,8 +273,13 @@ def correct_stt_errors(transcript: str, topic_hint: str = "") -> dict:
         payload = json.dumps({
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
-                "temperature": 0.0, "maxOutputTokens": 1024,
-                "thinkingConfig": {"thinkingBudget": 0},
+                # ملاحظة مهمة (اكتُشفت فعلياً في الإنتاج): إرسال "thinkingConfig":
+                # {"thinkingBudget": 0} لهذا الإصدار من النموذج (gemini-3.6-flash)
+                # يُرجع HTTP 400 Bad Request دائماً — الحقل قديم/غير مدعوم بهذا
+                # الشكل في هذا الإصدار. الحل المُثبَت (نفس الحل المستخدم في
+                # ask_teacher.py): عدم إرسال thinkingConfig إطلاقاً، ورفع
+                # الحصة القصوى للتوكنات لتعويض الاستهلاك الداخلي غير الظاهر.
+                "temperature": 0.0, "maxOutputTokens": 1600,
             },
         }).encode("utf-8")
         req = urllib.request.Request(
@@ -288,6 +294,16 @@ def correct_stt_errors(transcript: str, topic_hint: str = "") -> dict:
             parsed = json.loads(raw)
 
         proposed = parsed.get("corrections", []) or []
+    except urllib.error.HTTPError as ex:
+        # نطبع نص الخطأ الفعلي من Google (وليس فقط "400 Bad Request") لتشخيص
+        # سريع لأي مشكلة مستقبلية في شكل الطلب أو اسم النموذج، دون كسر التقييم.
+        try:
+            body = ex.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            body = "<could not read response body>"
+        logger.warning("STT correction: failed (HTTP %s) — %s — continuing with uncorrected transcript",
+                        ex.code, body)
+        return fallback
     except Exception as ex:
         # فشل الاتصال بـGemini لا يُسقط تقييم الطالب أبداً — نُكمل بالنص كما هو.
         logger.warning("STT correction: failed (%s: %s) — continuing with uncorrected transcript",

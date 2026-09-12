@@ -6,6 +6,7 @@ import json
 import re
 import logging
 import urllib.request
+import urllib.error
 
 from app.services.stt_correction import validate_diacritization
 
@@ -139,8 +140,13 @@ def diacritize_text(text: str) -> str:
         payload = json.dumps({
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
-                "temperature": 0.0, "maxOutputTokens": 2048,
-                "thinkingConfig": {"thinkingBudget": 0},
+                # ملاحظة مهمة (اكتُشفت فعلياً في الإنتاج): إرسال "thinkingConfig":
+                # {"thinkingBudget": 0} لهذا الإصدار من النموذج (gemini-3.6-flash)
+                # يُرجع HTTP 400 Bad Request دائماً — الحقل قديم/غير مدعوم بهذا
+                # الشكل في هذا الإصدار. الحل المُثبَت (نفس الحل المستخدم في
+                # ask_teacher.py): عدم إرسال thinkingConfig إطلاقاً، ورفع
+                # الحصة القصوى للتوكنات لتعويض الاستهلاك الداخلي غير الظاهر.
+                "temperature": 0.0, "maxOutputTokens": 3000,
             },
         }).encode("utf-8")
         req = urllib.request.Request(
@@ -155,6 +161,13 @@ def diacritize_text(text: str) -> str:
             return result
         logger.warning("Diacritization: Gemini result failed word-preservation validation — "
                         "falling back to dictionary method")
+    except urllib.error.HTTPError as ex:
+        try:
+            body = ex.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            body = "<could not read response body>"
+        logger.warning("Diacritization: Gemini call failed (HTTP %s) — %s — falling back to dictionary method",
+                        ex.code, body)
     except Exception as ex:
         logger.warning("Diacritization: Gemini call failed (%s: %s) — falling back to dictionary method",
                         type(ex).__name__, ex)
