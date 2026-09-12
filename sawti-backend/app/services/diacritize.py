@@ -4,7 +4,12 @@
 import os
 import json
 import re
+import logging
 import urllib.request
+
+from app.services.stt_correction import validate_diacritization
+
+logger = logging.getLogger("sawti.diacritize")
 
 
 COMMON: dict[str, str] = {
@@ -42,11 +47,22 @@ PREPOSITIONS = {"في", "من", "إلى", "على", "عن", "مع", "بين", "�
 
 
 def diacritize_text(text: str) -> str:
+    """
+    يُضيف تشكيلاً للنص المُعتمَد (canonical transcript) لغرض العرض فقط.
+    مهم جداً: هذه الدالة لا يجوز أن تُغيّر أي كلمة، تحذفها، تضيف كلمة جديدة،
+    أو تُغيّر ترتيب الكلمات — التشكيل النهائي يُرفَض ويُرجَع النص الأصلي بلا
+    تشكيل إن فشل التحقق (validate_diacritization)، حفاظاً على أن يبقى
+    الـcanonical transcript هو المصدر الوحيد المعتمد للتقييم والعرض.
+    """
     if not text or not text.strip():
         return text
     api_key = os.getenv("GEMINI_API_KEY", "")
     if not api_key:
-        return _dict_diacritize(text)
+        dict_result = _dict_diacritize(text)
+        if validate_diacritization(text, dict_result):
+            return dict_result
+        logger.warning("Diacritization: dictionary fallback failed validation — returning plain text")
+        return text
     try:
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -135,9 +151,19 @@ def diacritize_text(text: str) -> str:
         with urllib.request.urlopen(req, timeout=20) as resp:
             data = json.loads(resp.read())
             result = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            return result if result else _dict_diacritize(text)
-    except Exception:
-        return _dict_diacritize(text)
+        if result and validate_diacritization(text, result):
+            return result
+        logger.warning("Diacritization: Gemini result failed word-preservation validation — "
+                        "falling back to dictionary method")
+    except Exception as ex:
+        logger.warning("Diacritization: Gemini call failed (%s: %s) — falling back to dictionary method",
+                        type(ex).__name__, ex)
+
+    dict_result = _dict_diacritize(text)
+    if validate_diacritization(text, dict_result):
+        return dict_result
+    logger.warning("Diacritization: dictionary fallback also failed validation — returning plain text")
+    return text
 
 
 def _dict_diacritize(text: str) -> str:

@@ -1,16 +1,31 @@
 import os
 import re
 import json
+import time
+import logging
 import urllib.request
 import tempfile
 from typing import Optional
 from groq import Groq
 
-# كلمات عامة شائعة تساعد Whisper على التعرف الصحيح (تُستخدم دائماً كأساس)
+from app.services.stt_correction import (
+    find_fuzzy_hints,
+    apply_word_corrections,
+    validate_word_substitution,
+)
+
+logger = logging.getLogger("sawti.speech_eval")
+
+# كلمات عامة شائعة تساعد Whisper على التعرف الصحيح (تُستخدم دائماً كأساس).
+# هذا الـ prompt هو "سياق مساعد" فقط لِـ Whisper (initial prompt) وليس نصاً
+# يُفرَض على النموذج — لا يجعل Whisper يخترع كلمات لم يقلها الطالب، فقط يرفع
+# احتمال التعرف الصحيح عند التباس صوتي بسيط.
 BASE_ARABIC_PROMPT = (
     "هذا تسجيل صوتي لطالب عُماني في الصف السادس يتحدث باللغة العربية الفصحى بصوت طفل، "
-    "وبلهجة خليجية يُنطق فيها حرف الجيم أحياناً بصوت قريب من القاف (كما في كلمة الجو والجزر). "
-    "ذهبنا، قمنا، رأينا، شاهدنا، جميلة، رائعة، ممتعة، كثيراً، أيضاً، لقد، وقد، فقد، "
+    "بشكل حر وتلقائي وليس قراءة نص محفوظ. "
+    "قد يتحدث بلهجة خليجية يُنطق فيها حرف الجيم أحياناً بصوت قريب من القاف (كما في كلمة الجو والجزر). "
+    "اكتب فقط ما يُنطق فعلياً بدقة، دون إضافة أو حذف أو تحسين الصياغة. "
+    "كلمات شائعة في حديث الطلاب: ذهبنا، قمنا، رأينا، شاهدنا، جميلة، رائعة، ممتعة، كثيراً، أيضاً، لقد، وقد، فقد، "
     "أعتقد، في رأيي، لأن، لذلك، أولاً، ثانياً، أخيراً."
 )
 
@@ -36,9 +51,21 @@ def _build_prompt(topic_hint: str = "") -> str:
         clean_hint = re.sub(r"[\u064B-\u065F\u0670]", "", topic_hint)  # إزالة التشكيل قبل المطابقة
         for key, vocab in TOPIC_VOCAB.items():
             if key in clean_hint or clean_hint in key:
-                prompt = f"{prompt} كلمات متوقعة في هذا الموضوع: {vocab}."
+                prompt = f"{prompt} قد يستخدم الطالب بعض هذه الكلمات لأن موضوعه هو ({topic_hint}): {vocab}."
                 break
     return prompt
+
+
+def _topic_vocab_list(topic_hint: str = "") -> list[str]:
+    """يُعيد قائمة كلمات مفردات الموضوع (بدون فواصل) لاستخدامها في المقارنة
+    الصوتية (Layer 3)، بالاعتماد على نفس TOPIC_VOCAB المستخدم مع Whisper."""
+    if not topic_hint:
+        return []
+    clean_hint = re.sub(r"[\u064B-\u065F\u0670]", "", topic_hint)
+    for key, vocab in TOPIC_VOCAB.items():
+        if key in clean_hint or clean_hint in key:
+            return [w.strip() for w in vocab.split("،") if w.strip()]
+    return []
 
 
 # تصحيح ما بعد النسخ لالتباسات صوتية شائعة في اللهجة الخليجية/العُمانية (القاف تُسمع مكان الجيم
@@ -114,10 +141,14 @@ def _fix_phonetic_confusions(text: str, topic_hint: str = "") -> str:
 def transcribe_arabic_audio(audio_bytes: bytes, audio_format: str = "wav", topic_hint: str = "") -> str:
     client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
+    logger.info("Whisper request: format=%s size_bytes=%d topic_hint_set=%s",
+                audio_format, len(audio_bytes), bool(topic_hint))
+
     with tempfile.NamedTemporaryFile(suffix=f".{audio_format}", delete=False) as tmp:
         tmp.write(audio_bytes)
         tmp_path = tmp.name
 
+    t0 = time.monotonic()
     try:
         with open(tmp_path, "rb") as audio_file:
             transcription = client.audio.transcriptions.create(
@@ -128,10 +159,12 @@ def transcribe_arabic_audio(audio_bytes: bytes, audio_format: str = "wav", topic
                 prompt=_build_prompt(topic_hint),
                 temperature=0.0,  # أقل عشوائية = أدق
             )
-        return _fix_phonetic_confusions(
-            transcription.strip() if isinstance(transcription, str) else transcription.text.strip(),
-            topic_hint=topic_hint,
-        )
+        raw = transcription.strip() if isinstance(transcription, str) else transcription.text.strip()
+        fixed = _fix_phonetic_confusions(raw, topic_hint=topic_hint)
+        logger.info("Whisper response: duration_s=%.2f raw_word_count=%d layer1_changed=%s",
+                    time.monotonic() - t0, len(raw.split()), raw != fixed)
+        logger.debug("Whisper raw transcript: %s", raw)
+        return fixed
     finally:
         os.unlink(tmp_path)
 
@@ -143,71 +176,103 @@ def transcribe_arabic_audio(audio_bytes: bytes, audio_format: str = "wav", topic
 # أخطاء إملائية/نحوية حقيقية من الطالب)، بالاستعانة بسياق موضوع النشاط.
 # ═══════════════════════════════════════════════════════════════════════
 
-_STT_CORRECTION_PROMPT_TEMPLATE = """أنت خبير في تصحيح أخطاء أنظمة التعرف الآلي على الكلام العربي (Speech-to-Text).
+# ملاحظة تصميم مهمة: هذا الـ Prompt لا يطلب من Gemini "إعادة كتابة" النص
+# إطلاقاً — فقط يطلب منه قائمة تصحيحات (كلمة خطأ → كلمة صحيحة + درجة ثقة).
+# النص النهائي يُبنى برمجياً بعدها (apply_word_corrections) عبر استبدال كل
+# كلمة في مكانها بالضبط، فيستحيل بنيوياً أن يُضيف/يحذف/يُعيد ترتيب أي كلمة —
+# بعكس الاعتماد على نص مُعاد صياغته بالكامل من النموذج.
+_STT_CORRECTION_PROMPT_TEMPLATE = """أنت خبير في تصحيح أخطاء أنظمة التعرف الآلي على الكلام العربي (Speech-to-Text) فقط.
 سيصلك نص ناتج عن تحويل كلام طالب عُماني في الصف السادس إلى نص كتابةً.
 
-مهمتك الوحيدة: تصحيح الكلمات التي يبدو بوضوح أنها أخطاء تعرّف آلي على الصوت
-(كلمة سُمِعت خطأ وتحولت لكلمة أخرى قريبة صوتياً)، وليس تصحيح إملاء الطالب أو أسلوبه.
+مهمتك الوحيدة: تحديد الكلمات التي يبدو بوضوح أنها أخطاء تعرّف آلي على الصوت
+(كلمة سُمِعت خطأ وتحولت لكلمة أخرى قريبة صوتياً)، وليس تصحيح إملاء الطالب أو أسلوبه أو نحوه.
 
 أمثلة على أخطاء التعرف الآلي على الكلام (وليست أخطاء الطالب):
 جلسنا ← قلسنا، الأسماك ← الأسماء، المسبح ← المصبح، البذور ← الكثور،
 الشاطئ ← الشاتي، رجعنا ← رقعنا، جدي ← قدي، سبحت ← صبحت
 
 يجب عليك الالتزام الصارم بهذه القواعد:
-- لا تُعِد صياغة أي جملة، ولا تجعل النص أكثر فصاحة، ولا تُغيّر أسلوب الطالب.
-- لا تُغيّر ترتيب الجمل، ولا تُضِف كلمات جديدة، ولا تحذف كلمات صحيحة.
+- لا تقترح إعادة صياغة أي جملة، ولا تجعل النص أكثر فصاحة، ولا تُغيّر أسلوب الطالب.
+- لا تقترح إضافة كلمات جديدة أو حذف كلمات موجودة أو تغيير ترتيبها — فقط استبدال كلمة خطأ بكلمة صحيحة في نفس موضعها.
 - لا تُصحِّح الأخطاء النحوية الطبيعية للطالب، ولا الأخطاء الإملائية العادية
   (مثل: هاذا، مدرسه) — هذه ليست من مهمتك هنا إطلاقاً.
 - لا تعتبر اختلاف التشكيل/التنوين/الإعراب/علامات الترقيم خطأً على الإطلاق.
-- صحّح فقط كلمة يبدو بنسبة عالية جداً من الثقة أنها نتيجة سماع خاطئ للصوت،
-  خصوصاً إن كانت كلمة مقترَحة قريبة صوتياً موجودة ضمن سياق موضوع النشاط أدناه.
-- إن لم تكن واثقاً بنسبة عالية من أي تصحيح، لا تُغيّر شيئاً واتركه كما هو.
+- لا تصحّح كلمة لمجرد أنها غير مرتبطة بموضوع النشاط — كلمة صحيحة وواقعية حتى
+  لو كانت خارج سياق الموضوع يجب أن تبقى كما هي (الطالب يتحدث بحرية).
+- اقترح تصحيحاً فقط إذا توفّر معك دليل كافٍ من كل ما يلي معاً:
+  (١) الكلمة الناتجة غير منطقية أو غريبة جداً في سياق الجملة،
+  (٢) توجد كلمة بديلة قريبة صوتياً ومناسبة للسياق،
+  (٣) البديل لا يُغيّر المعنى العام لكلام الطالب بشكل جوهري.
+- إن لم تتوفر الأدلة الثلاثة معاً بثقة عالية، لا تقترح شيئاً لهذه الكلمة إطلاقاً.
 
-سياق النشاط (استخدمه للمساعدة في الاستنتاج، لا تكرره في الإجابة):
+سياق النشاط (استخدمه للمساعدة في الاستنتاج فقط، لا تكرره في الإجابة):
 {context}
+
+اقتراحات تشابه صوتي محسوبة آلياً بمقارنة الكلمات مع مفردات الموضوع (للاستئناس
+فقط، تحقق أنت من صحتها بالسياق قبل استخدامها، فقد تكون بعضها غير صحيحة):
+{hints}
 
 النص الناتج من التعرف الآلي على الكلام:
 \"\"\"{text}\"\"\"
 
-أعد النتيجة بصيغة JSON فقط دون أي نص إضافي، وفق هذا الشكل بالضبط:
-{{"correctedText": "النص كاملاً بعد التصحيح فقط (أو كما هو حرفياً إن لم يوجد أي خطأ تعرّف)", "corrections": [{{"original": "الكلمة كما وردت من STT", "corrected": "الكلمة بعد التصحيح", "reason": "Speech Recognition Error"}}]}}
+أعد النتيجة بصيغة JSON فقط دون أي نص إضافي أو Markdown، وفق هذا الشكل بالضبط.
+اجعل القائمة فارغة تماماً إن لم تجد أي تصحيح واثق منه بشدة:
+{{"corrections": [{{"wrong": "الكلمة كما وردت حرفياً في النص أعلاه (بدون أي تغيير)", "correct": "الكلمة الصحيحة", "reason": "سبب مختصر", "confidence": 0.0}}]}}
 
-إن لم تجد أي تصحيح، أعد: {{"correctedText": "{text}", "corrections": []}}
+قواعد تقدير الثقة (confidence، رقم بين 0 و1):
+- 0.9 فأعلى: شبه مؤكد أنه خطأ تعرّف آلي (الكلمة غير منطقية إطلاقاً ويوجد بديل صوتي واضح ومناسب للسياق).
+- 0.75 إلى 0.89: مرجَّح بقوة لكن ليس مؤكداً تماماً.
+- أقل من 0.75: شك فقط — لا تُدرجه في القائمة أصلاً، لأن ما دون ذلك لن يُطبَّق على أي حال.
+مهم جداً: قيمة "wrong" يجب أن تُطابق حرفياً كلمة موجودة فعلاً في النص أعلاه، وإلا فلن يُطبَّق تصحيحك مطلقاً.
 """
 
 
 def correct_stt_errors(transcript: str, topic_hint: str = "") -> dict:
     """
-    مرحلة "Speech Recognition Correction" المستقلة: تصحح فقط أخطاء ناتجة عن
-    التعرف الآلي على الكلام (وليس أخطاء الطالب اللغوية الحقيقية)، بالاستعانة
-    بسياق موضوع النشاط وكلماته المفتاحية. تُعيد النص كما هو دون أي تعديل إن
-    تعذّر الاتصال بـGemini أو لم يكن واثقاً من أي تصحيح.
+    مرحلة "Speech Recognition Correction" المستقلة (Layers 3+4+5): تصحح فقط
+    أخطاء ناتجة عن التعرف الآلي على الكلام (وليس أخطاء الطالب اللغوية
+    الحقيقية)، بالاستعانة بسياق موضوع النشاط وتلميحات تشابه صوتي محسوبة
+    آلياً (Layer 3)، ثم تحكيم Gemini (Layer 4) الذي يُعيد فقط قائمة تصحيحات
+    مع درجة ثقة — لا نصاً معاد صياغته. يُطبَّق كل تصحيح برمجياً وبأمان
+    (Layer 5) عبر استبدال كلمة بكلمة في مكانها فقط. تُعيد النص كما هو دون أي
+    تعديل إن تعذّر الاتصال بـGemini أو لم تتوفر ثقة كافية بأي تصحيح.
     """
     fallback = {"correctedText": transcript, "corrections": []}
     api_key = os.getenv("GEMINI_API_KEY", "")
-    if not api_key or not transcript or not transcript.strip():
+    if not transcript or not transcript.strip():
+        return fallback
+    if not api_key:
+        logger.warning("STT correction skipped: GEMINI_API_KEY not configured")
         return fallback
 
-    # نبني سياق النشاط من عنوانه وكلماته المفتاحية (نفس قاموس TOPIC_VOCAB
-    # المستخدم لتوجيه Whisper، حفاظاً على مصدر واحد للمعرفة بمفردات كل موضوع)
     clean_hint = re.sub(r"[\u064B-\u065F\u0670]", "", topic_hint) if topic_hint else ""
     context_parts = [f"عنوان النشاط: {topic_hint}"] if topic_hint else ["لا يوجد عنوان نشاط محدد."]
+    vocab_words = _topic_vocab_list(topic_hint)
     for key, vocab in TOPIC_VOCAB.items():
         if key in clean_hint or clean_hint in key:
             context_parts.append(f"الكلمات المساعدة لهذا الموضوع: {vocab}")
             break
     context = "\n".join(context_parts)
 
+    # Layer 3: تلميحات تشابه صوتي آلية (لا تُغيّر شيئاً بنفسها، فقط تُرفَق كسياق)
+    hints = find_fuzzy_hints(transcript, vocab_words)
+    hints_text = (
+        "\n".join(f"- «{h['whisper_word']}» قد تكون سماعاً خاطئاً لـ «{h['candidate']}» "
+                  f"(تشابه صوتي محسوب: {h['similarity']})" for h in hints)
+        if hints else "لا توجد تلميحات تشابه صوتي آلية لهذا النص."
+    )
+
+    t0 = time.monotonic()
     try:
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
             f"gemini-3.6-flash:generateContent?key={api_key}"
         )
-        prompt = _STT_CORRECTION_PROMPT_TEMPLATE.format(context=context, text=transcript)
+        prompt = _STT_CORRECTION_PROMPT_TEMPLATE.format(context=context, hints=hints_text, text=transcript)
         payload = json.dumps({
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
-                "temperature": 0.0, "maxOutputTokens": 2048,
+                "temperature": 0.0, "maxOutputTokens": 1024,
                 "thinkingConfig": {"thinkingBudget": 0},
             },
         }).encode("utf-8")
@@ -222,31 +287,39 @@ def correct_stt_errors(transcript: str, topic_hint: str = "") -> dict:
             raw = re.sub(r"^```(json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
             parsed = json.loads(raw)
 
-        corrected_text = parsed.get("correctedText", "").strip()
-        corrections = parsed.get("corrections", []) or []
-
-        # حماية إضافية: إن غيّر Gemini عدد الكلمات بشكل كبير (احتمال إعادة صياغة
-        # مخالفة للتعليمات)، نتجاهل تصحيحه بالكامل حفاظاً على أمانة كلام الطالب.
-        if not corrected_text:
-            return fallback
-        orig_wc, new_wc = len(transcript.split()), len(corrected_text.split())
-        if orig_wc and abs(new_wc - orig_wc) / orig_wc > 0.15:
-            print(f"[speech_eval] STT correction rejected: word count changed too much "
-                  f"({orig_wc} -> {new_wc})")
-            return fallback
-
-        clean_corrections = [
-            {"original": c.get("original", ""), "corrected": c.get("corrected", ""),
-             "reason": "Speech Recognition Error"}
-            for c in corrections if c.get("original") and c.get("corrected")
-        ]
-        return {"correctedText": corrected_text, "corrections": clean_corrections}
+        proposed = parsed.get("corrections", []) or []
     except Exception as ex:
-        print(f"[speech_eval] STT correction stage failed: {type(ex).__name__}: {ex}")
+        # فشل الاتصال بـGemini لا يُسقط تقييم الطالب أبداً — نُكمل بالنص كما هو.
+        logger.warning("STT correction: failed (%s: %s) — continuing with uncorrected transcript",
+                        type(ex).__name__, ex)
         return fallback
+
+    # Layer 5: تطبيق آمن (استبدال كلمة بكلمة فقط) + تحقق نهائي من سلامة النتيجة
+    corrected_text, applied = apply_word_corrections(transcript, proposed)
+    if applied and not validate_word_substitution(transcript, corrected_text):
+        # لا يجب أن يحدث هذا أبداً بما أن apply_word_corrections تستبدل كلمة
+        # بكلمة فقط، لكن نتحقق دفاعياً قبل الوثوق بالنتيجة على أي حال.
+        logger.warning("STT correction: rejected — post-substitution validation failed unexpectedly")
+        return fallback
+
+    duration = time.monotonic() - t0
+    if applied:
+        logger.info("STT correction: success — %d correction(s) applied in %.2fs: %s",
+                    len(applied), duration,
+                    ", ".join(f"{c['wrong']}->{c['correct']}({c['confidence']})" for c in applied))
+    else:
+        logger.info("STT correction: skipped — no correction met the confidence threshold (%.2fs)", duration)
+
+    return {"correctedText": corrected_text, "corrections": applied}
 
 
 def evaluate_speaking(transcript: str, reference_text: Optional[str] = None, lesson_id: str = "") -> dict:
+    """
+    ملاحظة مهمة: يجب أن يكون `transcript` هنا دائماً هو الـcanonical transcript
+    (أي بعد تصحيح أخطاء STT عبر correct_stt_errors، وليس النص الخام من
+    Whisper مباشرة) — بهذا لا يُعاقَب الطالب أبداً على خطأ تعرّف آلي على
+    الصوت، فقط على أخطائه اللغوية الحقيقية الموجودة فعلاً في كلامه.
+    """
     if not transcript or len(transcript.strip()) < 5:
         empty = {
             "overall": 0, "word_count": 0, "transcript": transcript,

@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from pydantic import BaseModel
 from app.services.speech_eval import transcribe_arabic_audio, evaluate_speaking, correct_stt_errors
@@ -8,6 +9,18 @@ from app.services.spell_check import check_spelling
 from app.services.ask_teacher import answer_student_question
 
 router = APIRouter()
+logger = logging.getLogger("sawti.evaluation")
+
+# صيغة الصوت الحقيقية تُشتق أولاً من الـContent-Type الذي يضعه المتصفح على
+# الملف (وهو دقيق دائماً لأنه مأخوذ من نوع الـBlob الفعلي)، وليس من امتداد
+# اسم الملف فقط — كان هذا الاعتماد على الاسم فقط سبباً محتملاً لإرسال صوت
+# WebM إلى Whisper API باسم/امتداد "wav" خاطئ (المحتوى الفعلي يبقى WebM
+# صحيحاً، لكن الامتداد المُرسَل معه لِـ Groq API كان مضلِّلاً).
+_CONTENT_TYPE_TO_EXT = {
+    "audio/webm": "webm", "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav",
+    "audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/ogg": "ogg", "audio/mp4": "mp4",
+    "audio/x-m4a": "m4a", "audio/m4a": "m4a",
+}
 
 
 class WritingEvalRequest(BaseModel):
@@ -59,29 +72,46 @@ async def evaluate_speech_endpoint(
     reference_text: str = "",
     audio_file: UploadFile = File(...),
 ):
-    allowed_types = ["audio/wav", "audio/mp3", "audio/webm", "audio/mpeg", "audio/ogg"]
-    if audio_file.content_type not in allowed_types:
+    content_type = (audio_file.content_type or "").split(";")[0].strip().lower()
+    allowed_types = ["audio/wav", "audio/mp3", "audio/webm", "audio/mpeg", "audio/ogg",
+                      "audio/x-wav", "audio/wave", "audio/mp4", "audio/x-m4a", "audio/m4a"]
+    if content_type not in allowed_types:
         raise HTTPException(400, "صيغة الملف غير مدعومة")
 
     audio_bytes = await audio_file.read()
-    filename = audio_file.filename or "recording.wav"
-    audio_format = filename.split(".")[-1] if "." in filename else "wav"
+
+    # الصيغة الحقيقية: أولاً من الـContent-Type الفعلي للملف (الأدق دائماً)،
+    # وفقط إن تعذّر ذلك نرجع لامتداد اسم الملف كحل احتياطي.
+    audio_format = _CONTENT_TYPE_TO_EXT.get(content_type)
+    if not audio_format:
+        filename = audio_file.filename or "recording.wav"
+        audio_format = filename.split(".")[-1].lower() if "." in filename else "wav"
+
+    logger.info("Speech eval request: lesson_id=%s content_type=%s resolved_format=%s size_bytes=%d",
+                lesson_id, content_type or "unknown", audio_format, len(audio_bytes))
 
     try:
         transcript = transcribe_arabic_audio(audio_bytes, audio_format, topic_hint=reference_text)
 
         # مرحلة مستقلة: تصحيح أخطاء التعرف الآلي على الكلام فقط (وليست أخطاء
-        # الطالب اللغوية) — التقييم يعتمد بعدها على النص المُصحَّح حصرياً.
+        # الطالب اللغوية) — التقييم يعتمد بعدها على النص المُصحَّح (canonical
+        # transcript) حصرياً، وبذلك لا يُعاقَب الطالب على خطأ Whisper.
         stt_fix = correct_stt_errors(transcript, topic_hint=reference_text)
         corrected_transcript = stt_fix["correctedText"]
 
         result = evaluate_speaking(corrected_transcript, reference_text or None, lesson_id)
         result["student_id"] = student_id
         result["lesson_id"] = lesson_id
-        result["raw_transcript"] = transcript          # النص الخام قبل تصحيح STT (للشفافية فقط)
-        result["stt_corrections"] = stt_fix["corrections"]  # الأخطاء التي صُحِّحت ولم تُحتسَب على الطالب
+        # الحقول التالية كانت موجودة سابقاً ولم تتغير أسماؤها أو معانيها (توافق خلفي):
+        result["raw_transcript"] = transcript                 # النص الخام قبل تصحيح STT (للشفافية فقط)
+        result["stt_corrections"] = stt_fix["corrections"]    # الأخطاء التي صُحِّحت ولم تُحتسَب على الطالب
+        # حقل جديد إضافي (لا يُلغي "transcript" الموجود، فقط اسم أوضح لنفس القيمة):
+        result["canonical_transcript"] = corrected_transcript  # النص المعتمد نهائياً للتقييم والعرض
+        logger.info("Speech eval done: word_count=%d corrections_applied=%d overall=%s",
+                    len(corrected_transcript.split()), len(stt_fix["corrections"]), result.get("overall"))
         return result
     except Exception as e:
+        logger.exception("Speech evaluation failed")
         raise HTTPException(500, f"خطأ في معالجة الصوت: {str(e)}")
 
 
