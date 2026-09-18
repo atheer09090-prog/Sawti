@@ -20,8 +20,9 @@ import os
 import re
 import json
 import logging
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from app.services import db
+from app.services.current_user import get_current_user_id
 
 router = APIRouter()
 logger = logging.getLogger("sawti.students")
@@ -72,19 +73,118 @@ def _warn_temp_storage():
 
 @router.get("")
 def list_students():
-    """قائمة كل الطلاب المحفوظين (لاستخدامها لاحقًا في لوحة المعلم)."""
+    """
+    قائمة كل الطلاب المحفوظين (لاستخدامها في لوحة المعلم). كل عنصر يحمل
+    أيضًا "_key" — المفتاح الحقيقي لصفّه في قاعدة البيانات (قد يكون
+    user_id لحساب جديد، أو "الاسم|الصف" لسجل قديم قبل ميزة الحسابات) —
+    ليستخدمه المعلم عند تعديل سجل الطالب بدل إعادة بناء مفتاح جديد قد
+    لا يطابق السجل الفعلي.
+    """
     if db.is_configured():
         db.ensure_table("students", _CREATE_TABLE_SQL)
         conn = db.get_conn()
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT data FROM students ORDER BY updated_at DESC")
-                return [row[0] for row in cur.fetchall()]
+                cur.execute("SELECT key, data FROM students ORDER BY updated_at DESC")
+                return [{**row[1], "_key": row[0]} for row in cur.fetchall()]
         finally:
             conn.close()
 
     _warn_temp_storage()
+    return [{**v, "_key": k} for k, v in _read_all_file().items()]
+
+    _warn_temp_storage()
     return list(_read_all_file().values())
+
+
+@router.get("/me")
+def get_my_record(user_id: str = Depends(get_current_user_id)):
+    """سجل تقدّم الطالب صاحب الحساب الحالي (بحسب رمز الجلسة)."""
+    if db.is_configured():
+        db.ensure_table("students", _CREATE_TABLE_SQL)
+        conn = db.get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT data FROM students WHERE key = %s", (user_id,))
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        if not row:
+            # حساب جديد بلا نشاط بعد — ليس خطأً، فقط لا يوجد شيء لاسترجاعه
+            return None
+        return row[0]
+
+    raise HTTPException(503, "خدمة الحسابات تتطلب قاعدة بيانات مضبوطة")
+
+
+@router.put("/me")
+def save_my_record(data: dict, user_id: str = Depends(get_current_user_id)):
+    """يحفظ تقدّم الطالب صاحب الحساب الحالي تلقائيًا (بدون زر حفظ)."""
+    if not db.is_configured():
+        raise HTTPException(503, "خدمة الحسابات تتطلب قاعدة بيانات مضبوطة")
+
+    db.ensure_table("students", _CREATE_TABLE_SQL)
+    data = dict(data)
+    name = _normalize(data.get("name", ""))
+    grade = _normalize(data.get("grade", ""))
+    conn = db.get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO students (key, name, grade, data, updated_at)
+                VALUES (%s, %s, %s, %s, now())
+                ON CONFLICT (key) DO UPDATE
+                SET data = EXCLUDED.data, name = EXCLUDED.name,
+                    grade = EXCLUDED.grade, updated_at = now()
+                """,
+                (user_id, name, grade, json.dumps(data, ensure_ascii=False)),
+            )
+        conn.commit()
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@router.put("/by-key")
+def save_by_key(payload: dict):
+    """
+    يحدّث سجل طالب بعينه عبر مفتاحه الحقيقي في قاعدة البيانات مباشرةً
+    (كما تُرجعه list_students في حقل "_key")، بدل إعادة بنائه من
+    الاسم والصف — وهو ما قد لا يطابق سجل حساب حديث مفتاحه user_id.
+    تستخدمه لوحة المعلم عند حفظ ملاحظة على طالب.
+    """
+    key = str(payload.get("key", "")).strip()
+    data = payload.get("data")
+    if not key or not isinstance(data, dict):
+        raise HTTPException(400, "بيانات ناقصة: يلزم key و data")
+
+    name = _normalize(data.get("name", ""))
+    grade = _normalize(data.get("grade", ""))
+
+    if db.is_configured():
+        db.ensure_table("students", _CREATE_TABLE_SQL)
+        conn = db.get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE students SET data = %s, name = %s, grade = %s, updated_at = now() WHERE key = %s",
+                    (json.dumps(data, ensure_ascii=False), name, grade, key),
+                )
+                if cur.rowcount == 0:
+                    raise HTTPException(404, "لم يُعثَر على سجل بهذا المفتاح")
+            conn.commit()
+            return {"ok": True}
+        finally:
+            conn.close()
+
+    _warn_temp_storage()
+    students = _read_all_file()
+    if key not in students:
+        raise HTTPException(404, "لم يُعثَر على سجل بهذا المفتاح")
+    students[key] = data
+    _write_all_file(students)
+    return {"ok": True}
 
 
 @router.get("/{name}/{grade}")
