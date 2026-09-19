@@ -27,7 +27,7 @@ except ImportError:
 # ── تسجيل خط عربي حقيقي (Amiri — نفس خط العناوين في واجهة المنصة) ──
 # دون هذا التسجيل يستخدم ReportLab خطوطًا أساسية (Helvetica) لا تحتوي
 # حروفًا عربية إطلاقًا، فتظهر كل الكلمات العربية كمربعات فارغة في الـ PDF.
-_FONTS_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "fonts")
+_FONTS_DIR = os.path.join(os.path.dirname(__file__), "..", "fonts")
 _REGULAR_PATH = os.path.join(_FONTS_DIR, "Amiri-Regular.ttf")
 _BOLD_PATH = os.path.join(_FONTS_DIR, "Amiri-Bold.ttf")
 
