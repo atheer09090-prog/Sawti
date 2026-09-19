@@ -4,8 +4,8 @@ from app.routers import evaluation, reports, lessons, students, auth, reviews, s
 import os
 
 app = FastAPI(
-    title="API - منصة صوتي قلمي",
-    description="خادم خلفي لمنصة تعليم اللغة العربية",
+    title="API - برنامج صوتي قلمي",
+    description="خادم خلفي لبرنامج تعليم اللغة العربية",
     version="1.0.0",
     docs_url="/api/docs",
 )
@@ -31,7 +31,7 @@ app.include_router(sus.router, prefix="/api/sus", tags=["استبيان SUS"])
 
 @app.get("/api/health")
 def health_check():
-    return {"status": "ok", "message": "✅ منصة صوتي قلمي تعمل بنجاح"}
+    return {"status": "ok", "message": "✅ برنامج صوتي قلمي يعمل بنجاح"}
 
 
 if __name__ == "__main__":

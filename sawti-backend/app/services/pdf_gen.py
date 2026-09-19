@@ -106,7 +106,7 @@ def generate_student_report(student_data: dict) -> bytes:
     )
 
     elements.append(Paragraph(ar("تقرير أداء الطالب"), title_style))
-    elements.append(Paragraph(ar("منصة صوتي قلمي — سلطنة عُمان"), normal_style))
+    elements.append(Paragraph(ar("برنامج صوتي قلمي — سلطنة عُمان"), normal_style))
     elements.append(Spacer(1, 0.5 * cm))
 
     # معلومات الطالب
