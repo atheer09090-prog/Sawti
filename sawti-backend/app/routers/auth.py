@@ -156,8 +156,13 @@ def login(payload: LoginPayload):
     finally:
         conn.close()
 
-    if not row or not verify_password(payload.password, row[4]):
-        raise HTTPException(401, "البريد الإلكتروني أو كلمة المرور غير صحيحة")
+    if not row:
+        # 404 (لا 401) لأن السبب هنا مختلف تمامًا: لا يوجد حساب أصلًا،
+        # وليس أن كلمة المرور خاطئة — الواجهة تستخدم هذا الفرق لتوجيه
+        # الطالب مباشرة لإنشاء حساب جديد بدل تكرار محاولة الدخول.
+        raise HTTPException(404, "لا يوجد حساب بهذا البريد الإلكتروني")
+    if not verify_password(payload.password, row[4]):
+        raise HTTPException(401, "كلمة المرور غير صحيحة")
 
     user_id, name, grade, avatar, _ = row
     token = create_token(user_id)
