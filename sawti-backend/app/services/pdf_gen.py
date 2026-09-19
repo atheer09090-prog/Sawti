@@ -192,6 +192,133 @@ def generate_student_report(student_data: dict) -> bytes:
     return buffer.getvalue()
 
 
+def generate_sus_report(rows: list, summary: dict) -> bytes:
+    """
+    تقرير PDF لنتائج استبيان SUS، يضم: ملخصًا رقميًا، مخطط دائري (Pie)
+    لتوزيع المشاركين على تصنيفات SUS الثلاثة، ومخطط أعمدة (Bar) لمتوسط
+    إجابة كل عبارة من العبارات العشر عبر كل المشاركين — وهو ما يفيد
+    المعلم/الباحث في تحديد أي جوانب البرنامج الأضعف بدقة.
+    """
+    from reportlab.graphics.shapes import Drawing, String
+    from reportlab.graphics.charts.piecharts import Pie
+    from reportlab.graphics.charts.barcharts import VerticalBarChart
+    from reportlab.graphics.charts.legends import Legend
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        rightMargin=2 * cm, leftMargin=2 * cm, topMargin=2 * cm, bottomMargin=2 * cm,
+    )
+    elements = []
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle("ArabicTitle", parent=styles["Title"], fontName=FONT_BOLD,
+                                  fontSize=18, alignment=TA_RIGHT, spaceAfter=12)
+    heading_style = ParagraphStyle("ArabicHeading", parent=styles["Heading2"], fontName=FONT_BOLD,
+                                    fontSize=13, alignment=TA_RIGHT, spaceAfter=8, spaceBefore=14)
+    normal_style = ParagraphStyle("ArabicNormal", parent=styles["Normal"], fontName=FONT_REGULAR,
+                                   fontSize=11, alignment=TA_RIGHT)
+
+    elements.append(Paragraph(ar("تقرير استبيان قابلية الاستخدام (SUS)"), title_style))
+    elements.append(Paragraph(ar(f"برنامج صوتي قلمي — تاريخ التصدير: {datetime.now().strftime('%Y-%m-%d')}"), normal_style))
+    elements.append(Spacer(1, 0.5 * cm))
+
+    count = summary.get("count", 0)
+    average = summary.get("average")
+    bands = summary.get("bands", {"poor": 0, "ok": 0, "good": 0})
+
+    if count == 0:
+        elements.append(Paragraph(ar("لا توجد إجابات على الاستبيان بعد."), normal_style))
+        doc.build(elements)
+        return buffer.getvalue()
+
+    # ── جدول الملخص ──
+    summary_data = [
+        [ar("القيمة"), ar("المؤشر")],
+        [str(average), ar("متوسط درجة SUS (من 100)")],
+        [str(count), ar("عدد المشاركين")],
+        [str(bands.get("good", 0)), ar("جيد إلى ممتاز (70 فأكثر)")],
+        [str(bands.get("ok", 0)), ar("مقبول / متوسط (50-70)")],
+        [str(bands.get("poor", 0)), ar("يحتاج إلى تحسين (أقل من 50)")],
+    ]
+    summary_table = Table(summary_data, colWidths=[4 * cm, 10 * cm])
+    summary_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a5c2a")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), FONT_BOLD),
+        ("FONTNAME", (0, 1), (-1, -1), FONT_REGULAR),
+        ("FONTSIZE", (0, 0), (-1, -1), 11),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f3f4f6")]),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    elements.append(summary_table)
+
+    # ── المخطط الدائري: توزيع المشاركين على التصنيفات ──
+    elements.append(Paragraph(ar("توزيع المشاركين حسب التصنيف"), heading_style))
+    pie_drawing = Drawing(400, 200)
+    pie = Pie()
+    pie.x, pie.y = 150, 20
+    pie.width, pie.height = 160, 160
+    pie_values = [bands.get("good", 0), bands.get("ok", 0), bands.get("poor", 0)]
+    pie_labels = ["good", "ok", "poor"]
+    # نستبعد التصنيفات بلا أي مشارك حتى لا يظهر قطاع بلا قيمة في الرسم
+    nonzero = [(v, l) for v, l in zip(pie_values, pie_labels) if v > 0]
+    pie.data = [v for v, _ in nonzero]
+    pie.labels = [str(v) for v, _ in nonzero]
+    pie_colors = {"good": colors.HexColor("#16a34a"), "ok": colors.HexColor("#f59e0b"), "poor": colors.HexColor("#dc2626")}
+    for i, (_, label) in enumerate(nonzero):
+        pie.slices[i].fillColor = pie_colors[label]
+    pie_drawing.add(pie)
+
+    legend = Legend()
+    legend.x = 330
+    legend.y = 140
+    legend.dx = 8
+    legend.dy = 8
+    legend.fontName = FONT_REGULAR
+    legend.fontSize = 9
+    legend_labels = {"good": "جيد فأكثر", "ok": "متوسط", "poor": "يحتاج تحسينًا"}
+    legend.colorNamePairs = [(pie_colors[label], ar(legend_labels[label])) for _, label in nonzero]
+    pie_drawing.add(legend)
+    elements.append(pie_drawing)
+
+    # ── مخطط الأعمدة: متوسط كل عبارة من العبارات العشر ──
+    elements.append(Paragraph(ar("متوسط الإجابة على كل عبارة (1-5)"), heading_style))
+    item_count = 10
+    item_sums = [0.0] * item_count
+    valid_rows = [r for r in rows if isinstance(r.get("answers"), list) and len(r["answers"]) == item_count]
+    for r in valid_rows:
+        for i, a in enumerate(r["answers"]):
+            item_sums[i] += a
+    n = max(len(valid_rows), 1)
+    item_avgs = [round(s / n, 2) for s in item_sums]
+
+    bar_drawing = Drawing(460, 220)
+    bar = VerticalBarChart()
+    bar.x, bar.y = 40, 30
+    bar.width, bar.height = 400, 160
+    bar.data = [item_avgs]
+    bar.categoryAxis.categoryNames = [str(i + 1) for i in range(item_count)]
+    bar.categoryAxis.labels.fontName = FONT_REGULAR
+    bar.valueAxis.valueMin = 0
+    bar.valueAxis.valueMax = 5
+    bar.valueAxis.valueStep = 1
+    bar.bars[0].fillColor = colors.HexColor("#1a5c2a")
+    bar_drawing.add(bar)
+    bar_drawing.add(String(220, 205, ar("رقم العبارة"), fontName=FONT_REGULAR, fontSize=9, textAnchor="middle"))
+    elements.append(bar_drawing)
+    elements.append(Paragraph(
+        ar("العبارات ذات الأرقام الزوجية (2، 4، 6، 8، 10) سلبية الصياغة، فانخفاض متوسطها مؤشر إيجابي."),
+        ParagraphStyle("Note", parent=normal_style, fontSize=9, textColor=colors.grey),
+    ))
+
+    doc.build(elements)
+    return buffer.getvalue()
+
+
 def _get_grade(score: float) -> str:
     if score >= 90:
         return "ممتاز"

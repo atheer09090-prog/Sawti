@@ -192,6 +192,22 @@ def export_sus():
     return [{"user_id": k, **v} for k, v in _read_file().items()]
 
 
+@router.get("/report")
+def sus_report():
+    """تقرير PDF مرئي (رسوم بيانية) لنتائج استبيان SUS، لاستخدام المعلم/الباحث."""
+    from fastapi.responses import Response
+    from app.services.pdf_gen import generate_sus_report
+
+    rows = export_sus()
+    summary = sus_summary()
+    pdf_bytes = generate_sus_report(rows, summary)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=sus_report.pdf"},
+    )
+
+
 @router.get("/summary")
 def sus_summary():
     """ملخص سريع (للوحة المعلم): عدد المشاركين، متوسط الدرجة، وتوزيعهم على التصنيفات الثلاثة."""
