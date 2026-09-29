@@ -15,6 +15,7 @@ import os
 import re
 import uuid
 import json
+import secrets
 import logging
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, EmailStr, field_validator
@@ -89,6 +90,47 @@ def teacher_login(payload: dict):
     if not code or code != TEACHER_ACCESS_CODE:
         raise HTTPException(401, "رمز الدخول غير صحيح")
     return {"ok": True}
+
+
+@router.post("/guest-login")
+def guest_login():
+    """
+    دخول تجريبي فوري بلا بريد إلكتروني ولا كلمة مرور — مخصَّص لأعضاء
+    لجنة التحكيم أو أي زائر يريد استكشاف البرنامج بسرعة. كل ضغطة على
+    هذا الزر تُنشئ حسابًا معزولًا جديدًا (ببريد وكلمة مرور عشوائيين
+    داخليًا لا يراهما أحد)، حتى لا يتشارك عدة أعضاء لجنة نفس الحساب
+    ويكتب كل واحد فوق تقدّم الآخر.
+    """
+    _require_db()
+    db.ensure_table("users", _CREATE_USERS_TABLE_SQL)
+
+    user_id = str(uuid.uuid4())
+    guest_email = f"guest-{user_id[:8]}@sawti-qalami.local"
+    guest_password_hash = hash_password(secrets.token_hex(16))
+
+    conn = db.get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO users (id, name, grade, avatar, email, password_hash, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, now())
+                """,
+                (user_id, "عُضْوُ لَجْنَةِ التَّحْكِيمِ", "زَائِرٌ تَجْرِيبِيٌّ", "boy1", guest_email, guest_password_hash),
+            )
+        conn.commit()
+    except Exception:
+        logger.exception("Auth: guest login failed")
+        raise HTTPException(500, "تعذّر إنشاء دخول تجريبي، حاول مرة أخرى")
+    finally:
+        conn.close()
+
+    token = create_token(user_id)
+    return {
+        "ok": True,
+        "token": token,
+        "user": {"id": user_id, "name": "عُضْوُ لَجْنَةِ التَّحْكِيمِ", "grade": "زَائِرٌ تَجْرِيبِيٌّ", "avatar": "boy1", "email": guest_email},
+    }
 
 
 @router.post("/register")
