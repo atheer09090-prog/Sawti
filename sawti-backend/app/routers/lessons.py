@@ -11,13 +11,14 @@ import copy
 from fastapi import APIRouter, HTTPException, Depends
 from app.services.current_user import require_teacher
 from app.services import content_store
+from app.services.write_lock import serialize_writes
 from pydantic import BaseModel
 from typing import List, Optional
 
 router = APIRouter()
 
 # كل عمليات التعديل (POST/PUT/DELETE) للمعلم فقط؛ الـGET يبقى مفتوحًا لأن الطالب يقرأ منه.
-TEACHER_ONLY = [Depends(require_teacher)]
+TEACHER_ONLY = [Depends(require_teacher), Depends(serialize_writes)]
 
 # البيانات الافتراضية
 DEFAULT_DATA = {

@@ -1,35 +1,24 @@
 """
-تقييمات الطلاب لتجربة استخدام المنصة (وليس تقييمات الدروس). يُقدّمها
-الطالب اختياريًا عبر زر "⭐ قيّم المنصة" في صفحته الرئيسية، ويراها
-المعلم في تبويب "التقييمات" بلوحة التحكم. محفوظة كملف JSON على القرص
-بنفس نمط بقية الملفات في هذا المشروع (لا قاعدة بيانات).
+تقييمات الطلاب القديمة لتجربة استخدام المنصة (النجوم 1-5). يُقدّمها الطالب
+المسجَّل، ويراها المعلم فقط في تبويب "التقييمات" بلوحة التحكم.
+
+تُحفَظ في PostgreSQL ضمن جدول content_store (المفتاح reviews) مثل بقية محتوى
+المعلم، فلا تضيع عند إعادة نشر Render. (استبيان SUS هو التقييم الحالي في الواجهة.)
 """
-import os
-import json
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends
 from app.services.current_user import get_current_user_id, require_teacher
+from app.services import content_store
+from app.services.write_lock import serialize_writes
 
 router = APIRouter()
 
-REVIEWS_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "reviews.json")
+MAX_REVIEWS = 5000      # سقف أمان: لا ينمو الجدول بلا حدّ
+MAX_COMMENT_CHARS = 1000
 
 
 def _read_reviews() -> list:
-    os.makedirs(os.path.dirname(REVIEWS_FILE), exist_ok=True)
-    if not os.path.exists(REVIEWS_FILE):
-        return []
-    with open(REVIEWS_FILE, "r", encoding="utf-8") as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return []
-
-
-def _write_reviews(data: list):
-    os.makedirs(os.path.dirname(REVIEWS_FILE), exist_ok=True)
-    with open(REVIEWS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    return content_store.get("reviews", lambda: [])
 
 
 @router.get("", dependencies=[Depends(require_teacher)])
@@ -37,7 +26,7 @@ def list_reviews():
     return _read_reviews()
 
 
-@router.post("")
+@router.post("", dependencies=[Depends(serialize_writes)])
 def add_review(review: dict, user_id: str = Depends(get_current_user_id)):
     try:
         quality = int(review.get("quality", 0))
@@ -49,15 +38,21 @@ def add_review(review: dict, user_id: str = Depends(get_current_user_id)):
     if not (1 <= quality <= 5 and 1 <= ease <= 5 and 1 <= benefit <= 5):
         raise HTTPException(400, "التقييمات يجب أن تكون بين 1 و5")
 
+    comment = str(review.get("comment", "")).strip()
+    if len(comment) > MAX_COMMENT_CHARS:
+        raise HTTPException(413, f"التعليق أطول من المسموح ({MAX_COMMENT_CHARS} حرف)")
+
     data = _read_reviews()
+    if len(data) >= MAX_REVIEWS:
+        raise HTTPException(503, "تعذّر حفظ التقييم الآن")
     data.append({
         "id": (data[-1]["id"] + 1) if data else 1,
-        "student": str(review.get("student", "")).strip() or "طَالِبٌ",
+        "student": str(review.get("student", "")).strip()[:100] or "طَالِبٌ",
         "date": datetime.now().strftime("%Y-%m-%d"),
         "quality": quality,
         "ease": ease,
         "benefit": benefit,
-        "comment": str(review.get("comment", "")).strip(),
+        "comment": comment,
     })
-    _write_reviews(data)
+    content_store.put("reviews", data)
     return {"ok": True}

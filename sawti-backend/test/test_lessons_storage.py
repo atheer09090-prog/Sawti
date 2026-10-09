@@ -176,3 +176,20 @@ print("LOCAL", os.path.exists("app/data/local/speaking.json"))
     assert "POST 503" in out.stdout, out.stdout + out.stderr
     assert "LEAKED []" in out.stdout, out.stdout     # لا ملفات محتوى على القرص
     assert "LOCAL False" in out.stdout, out.stdout   # ولا ملفات تطوير محلية في الإنتاج
+
+
+@needs_db
+def test_concurrent_teacher_edits_do_not_lose_updates(client, teacher_headers):
+    """عشرون إضافة متزامنة لنفس القائمة: يجب أن تبقى كلها (بدون القفل كان بعضها يضيع)."""
+    from concurrent.futures import ThreadPoolExecutor
+    _wipe(["dictation"])
+    start = len(client.get("/api/lessons/dictation").json())
+    d = {"word": "ك", "type": "ن", "correct": "ك", "opts": ["ك", "ق"], "hint": "ت"}
+
+    def add(_):
+        return client.post("/api/lessons/dictation", json=d, headers=teacher_headers).status_code
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        codes = list(ex.map(add, range(20)))
+    assert set(codes) == {200}
+    assert len(client.get("/api/lessons/dictation").json()) == start + 20

@@ -154,15 +154,21 @@ def test_sus_student_submit_and_teacher_only_reports(client, teacher_headers):
 
 # ═════════════ التقييمات القديمة ═════════════
 
-def test_reviews_student_post_teacher_get(client, teacher_headers, tmp_path, monkeypatch):
+def test_reviews_student_post_teacher_get_and_stored_in_db(client, teacher_headers):
+    import os
     from app.routers import reviews
-    monkeypatch.setattr(reviews, "REVIEWS_FILE", str(tmp_path / "reviews.json"))  # لا نلوّث app/data
     _, h, _ = register(client)
     body = {"student": "ز", "quality": 5, "ease": 4, "benefit": 5, "comment": "ممتاز"}
+    n = len(reviews._read_reviews())
     assert client.post("/api/reviews", json=body).status_code == 401
     assert client.post("/api/reviews", json=body, headers=h).status_code == 200
+    assert client.post("/api/reviews", json={**body, "quality": 9}, headers=h).status_code == 400
+    assert client.post("/api/reviews", json={**body, "comment": "ع" * 1001}, headers=h).status_code == 413
     assert client.get("/api/reviews", headers=h).status_code == 403
-    assert client.get("/api/reviews", headers=teacher_headers).status_code == 200
+    got = client.get("/api/reviews", headers=teacher_headers).json()
+    assert len(got) == n + 1 and got[-1]["comment"] == "ممتاز"
+    # لا ملف reviews.json على القرص
+    assert not os.path.exists(os.path.join(os.path.dirname(reviews.__file__), "..", "data", "reviews.json"))
 
 
 # ═════════════ حدود المحاولات ═════════════
