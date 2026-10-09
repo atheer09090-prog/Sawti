@@ -22,10 +22,13 @@ import json
 import logging
 from fastapi import APIRouter, HTTPException, Depends
 from app.services import db
-from app.services.current_user import get_current_user_id
+from app.services.current_user import get_current_user_id, require_teacher
 
 router = APIRouter()
 logger = logging.getLogger("sawti.students")
+
+# أقصى حجم لسجل الطالب المرسَل (بالبايت) — حماية من حشو قاعدة البيانات
+MAX_RECORD_BYTES = 256 * 1024
 
 _CREATE_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS students (
@@ -71,7 +74,7 @@ def _warn_temp_storage():
                     "لن يبقى بعد أي عملية نشر جديدة على Render")
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(require_teacher)])
 def list_students():
     """
     قائمة كل الطلاب المحفوظين (لاستخدامها في لوحة المعلم). كل عنصر يحمل
@@ -92,9 +95,6 @@ def list_students():
 
     _warn_temp_storage()
     return [{**v, "_key": k} for k, v in _read_all_file().items()]
-
-    _warn_temp_storage()
-    return list(_read_all_file().values())
 
 
 @router.get("/me")
@@ -119,17 +119,29 @@ def get_my_record(user_id: str = Depends(get_current_user_id)):
 
 @router.put("/me")
 def save_my_record(data: dict, user_id: str = Depends(get_current_user_id)):
-    """يحفظ تقدّم الطالب صاحب الحساب الحالي تلقائيًا (بدون زر حفظ)."""
+    """
+    يحفظ تقدّم الطالب صاحب الحساب الحالي تلقائيًا (بدون زر حفظ).
+
+    teacherComment يملكه المعلم وحده: يحتفظ الخادم بقيمته المخزَّنة ولا يقبل
+    قيمة الطالب لها — وإلا كان الحفظ التلقائي (بنسخة محلية قديمة) يمحو
+    تعليق المعلم، وكان الطالب يستطيع كتابة تعليق باسم المعلم.
+    """
     if not db.is_configured():
         raise HTTPException(503, "خدمة الحسابات تتطلب قاعدة بيانات مضبوطة")
 
-    db.ensure_table("students", _CREATE_TABLE_SQL)
     data = dict(data)
+    if len(json.dumps(data, ensure_ascii=False).encode("utf-8")) > MAX_RECORD_BYTES:
+        raise HTTPException(413, "حجم بيانات التقدّم أكبر من المسموح")
+
+    db.ensure_table("students", _CREATE_TABLE_SQL)
     name = _normalize(data.get("name", ""))
     grade = _normalize(data.get("grade", ""))
     conn = db.get_conn()
     try:
         with conn.cursor() as cur:
+            cur.execute("SELECT data FROM students WHERE key = %s", (user_id,))
+            row = cur.fetchone()
+            data["teacherComment"] = (row[0] or {}).get("teacherComment", "") if row else ""
             cur.execute(
                 """
                 INSERT INTO students (key, name, grade, data, updated_at)
@@ -146,33 +158,39 @@ def save_my_record(data: dict, user_id: str = Depends(get_current_user_id)):
         conn.close()
 
 
-@router.put("/by-key")
+@router.put("/by-key", dependencies=[Depends(require_teacher)])
 def save_by_key(payload: dict):
     """
-    يحدّث سجل طالب بعينه عبر مفتاحه الحقيقي في قاعدة البيانات مباشرةً
-    (كما تُرجعه list_students في حقل "_key")، بدل إعادة بنائه من
-    الاسم والصف — وهو ما قد لا يطابق سجل حساب حديث مفتاحه user_id.
-    تستخدمه لوحة المعلم عند حفظ ملاحظة على طالب.
+    تعليق المعلم على طالب بعينه، عبر مفتاح سجله الحقيقي (حقل "_key" من
+    list_students) — للمعلم فقط.
+
+    يُطبَّق على السجل الحالي في القاعدة حقل teacherComment وحده؛ باقي حقول
+    data المُرسَلة تُتجاهَل، كي لا تُستبدَل نقاط الطالب وتقدّمه بنسخة قديمة
+    كان المعلم قد حمّلها قبل أن يتابع الطالب اللعب.
     """
     key = str(payload.get("key", "")).strip()
     data = payload.get("data")
     if not key or not isinstance(data, dict):
         raise HTTPException(400, "بيانات ناقصة: يلزم key و data")
-
-    name = _normalize(data.get("name", ""))
-    grade = _normalize(data.get("grade", ""))
+    comment = str(data.get("teacherComment", ""))
+    if len(comment) > 2000:
+        raise HTTPException(413, "التعليق طويل جدًا")
 
     if db.is_configured():
         db.ensure_table("students", _CREATE_TABLE_SQL)
         conn = db.get_conn()
         try:
             with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE students SET data = %s, name = %s, grade = %s, updated_at = now() WHERE key = %s",
-                    (json.dumps(data, ensure_ascii=False), name, grade, key),
-                )
-                if cur.rowcount == 0:
+                cur.execute("SELECT data FROM students WHERE key = %s", (key,))
+                row = cur.fetchone()
+                if not row:
                     raise HTTPException(404, "لم يُعثَر على سجل بهذا المفتاح")
+                current = dict(row[0] or {})
+                current["teacherComment"] = comment
+                cur.execute(
+                    "UPDATE students SET data = %s, updated_at = now() WHERE key = %s",
+                    (json.dumps(current, ensure_ascii=False), key),
+                )
             conn.commit()
             return {"ok": True}
         finally:
@@ -182,12 +200,16 @@ def save_by_key(payload: dict):
     students = _read_all_file()
     if key not in students:
         raise HTTPException(404, "لم يُعثَر على سجل بهذا المفتاح")
-    students[key] = data
+    students[key]["teacherComment"] = comment
     _write_all_file(students)
     return {"ok": True}
 
 
-@router.get("/{name}/{grade}")
+# ── مسارات قديمة مبنية على الاسم+الصف (قبل الحسابات) ──
+# أُبقيت للمعلم فقط (خيار B) لأن الترحيل من السجلات القديمة ما زال يعتمد على
+# مفتاح "الاسم|الصف"، ولا يجوز أن يقرأها أو يكتبها أي طالب أو زائر.
+
+@router.get("/{name}/{grade}", dependencies=[Depends(require_teacher)])
 def get_student(name: str, grade: str):
     key = _key(name, grade)
 
@@ -211,7 +233,7 @@ def get_student(name: str, grade: str):
     return record
 
 
-@router.put("/{name}/{grade}")
+@router.put("/{name}/{grade}", dependencies=[Depends(require_teacher)])
 def save_student(name: str, grade: str, data: dict):
     key = _key(name, grade)
     data = dict(data)

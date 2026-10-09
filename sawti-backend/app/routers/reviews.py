@@ -7,7 +7,8 @@
 import os
 import json
 from datetime import datetime
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+from app.services.current_user import get_current_user_id, require_teacher
 
 router = APIRouter()
 
@@ -31,13 +32,13 @@ def _write_reviews(data: list):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(require_teacher)])
 def list_reviews():
     return _read_reviews()
 
 
 @router.post("")
-def add_review(review: dict):
+def add_review(review: dict, user_id: str = Depends(get_current_user_id)):
     try:
         quality = int(review.get("quality", 0))
         ease = int(review.get("ease", 0))

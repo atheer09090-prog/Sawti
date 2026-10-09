@@ -26,7 +26,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, field_validator
 
 from app.services import db
-from app.services.current_user import get_current_user_id
+from app.services.current_user import get_current_user_id, require_teacher
 
 router = APIRouter()
 logger = logging.getLogger("sawti.sus")
@@ -164,7 +164,7 @@ def get_my_sus(user_id: str = Depends(get_current_user_id)):
     return {"score": data["sus_score"], "band": score_band(data["sus_score"]), "updated_at": data["updated_at"]}
 
 
-@router.get("/export")
+@router.get("/export", dependencies=[Depends(require_teacher)])
 def export_sus():
     """
     كل إجابات الاستبيان مفصّلة (لكل طالب إجاباته العشر + درجته) لأغراض
@@ -192,7 +192,7 @@ def export_sus():
     return [{"user_id": k, **v} for k, v in _read_file().items()]
 
 
-@router.get("/report")
+@router.get("/report", dependencies=[Depends(require_teacher)])
 def sus_report():
     """تقرير PDF مرئي (رسوم بيانية) لنتائج استبيان SUS، لاستخدام المعلم/الباحث."""
     from fastapi.responses import Response
@@ -208,7 +208,7 @@ def sus_report():
     )
 
 
-@router.get("/summary")
+@router.get("/summary", dependencies=[Depends(require_teacher)])
 def sus_summary():
     """ملخص سريع (للوحة المعلم): عدد المشاركين، متوسط الدرجة، وتوزيعهم على التصنيفات الثلاثة."""
     rows = export_sus()

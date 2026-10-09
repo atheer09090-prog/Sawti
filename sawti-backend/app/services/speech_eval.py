@@ -140,6 +140,12 @@ def _fix_phonetic_confusions(text: str, topic_hint: str = "") -> str:
 
 
 def transcribe_arabic_audio(audio_bytes: bytes, audio_format: str = "wav", topic_hint: str = "") -> str:
+    """يرجع النص بعد طبقة القواعد الصوتية (للتوافق). للنص الخام فعلًا استخدم transcribe_arabic_audio_detailed."""
+    return transcribe_arabic_audio_detailed(audio_bytes, audio_format, topic_hint)["rules_text"]
+
+
+def transcribe_arabic_audio_detailed(audio_bytes: bytes, audio_format: str = "wav", topic_hint: str = "") -> dict:
+    """يرجع {"whisper_text": ما قاله Whisper حرفيًا, "rules_text": بعده طبقة القواعد الصوتية}."""
     client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
     logger.info("Whisper request: format=%s size_bytes=%d topic_hint_set=%s",
@@ -165,7 +171,7 @@ def transcribe_arabic_audio(audio_bytes: bytes, audio_format: str = "wav", topic
         logger.info("Whisper response: duration_s=%.2f raw_word_count=%d layer1_changed=%s",
                     time.monotonic() - t0, len(raw.split()), raw != fixed)
         logger.debug("Whisper raw transcript: %s", raw)
-        return fixed
+        return {"whisper_text": raw, "rules_text": fixed}
     finally:
         os.unlink(tmp_path)
 
@@ -238,13 +244,13 @@ def correct_stt_errors(transcript: str, topic_hint: str = "") -> dict:
     (Layer 5) عبر استبدال كلمة بكلمة في مكانها فقط. تُعيد النص كما هو دون أي
     تعديل إن تعذّر الاتصال بـGemini أو لم تتوفر ثقة كافية بأي تصحيح.
     """
-    fallback = {"correctedText": transcript, "corrections": []}
+    fallback = {"correctedText": transcript, "corrections": [], "status": "skipped_empty"}
     api_key = os.getenv("GEMINI_API_KEY", "")
     if not transcript or not transcript.strip():
         return fallback
     if not api_key:
         logger.warning("STT correction skipped: GEMINI_API_KEY not configured")
-        return fallback
+        return {**fallback, "status": "skipped_no_api_key"}
 
     clean_hint = re.sub(r"[\u064B-\u065F\u0670]", "", topic_hint) if topic_hint else ""
     context_parts = [f"عنوان النشاط: {topic_hint}"] if topic_hint else ["لا يوجد عنوان نشاط محدد."]
@@ -303,12 +309,12 @@ def correct_stt_errors(transcript: str, topic_hint: str = "") -> dict:
             body = "<could not read response body>"
         logger.warning("STT correction: failed (HTTP %s) — %s — continuing with uncorrected transcript",
                         ex.code, body)
-        return fallback
+        return {**fallback, "status": "failed_http"}
     except Exception as ex:
         # فشل الاتصال بـGemini لا يُسقط تقييم الطالب أبداً — نُكمل بالنص كما هو.
         logger.warning("STT correction: failed (%s: %s) — continuing with uncorrected transcript",
                         type(ex).__name__, ex)
-        return fallback
+        return {**fallback, "status": "failed_error"}
 
     # Layer 5: تطبيق آمن (استبدال كلمة بكلمة فقط) + تحقق نهائي من سلامة النتيجة
     corrected_text, applied = apply_word_corrections(transcript, proposed)
@@ -316,7 +322,7 @@ def correct_stt_errors(transcript: str, topic_hint: str = "") -> dict:
         # لا يجب أن يحدث هذا أبداً بما أن apply_word_corrections تستبدل كلمة
         # بكلمة فقط، لكن نتحقق دفاعياً قبل الوثوق بالنتيجة على أي حال.
         logger.warning("STT correction: rejected — post-substitution validation failed unexpectedly")
-        return fallback
+        return {**fallback, "status": "failed_validation"}
 
     duration = time.monotonic() - t0
     if applied:
@@ -326,7 +332,8 @@ def correct_stt_errors(transcript: str, topic_hint: str = "") -> dict:
     else:
         logger.info("STT correction: skipped — no correction met the confidence threshold (%.2fs)", duration)
 
-    return {"correctedText": corrected_text, "corrections": applied}
+    return {"correctedText": corrected_text, "corrections": applied,
+            "status": "applied" if applied else "no_corrections_needed"}
 
 
 def evaluate_speaking(transcript: str, reference_text: Optional[str] = None, lesson_id: str = "") -> dict:
@@ -385,7 +392,7 @@ def evaluate_speaking(transcript: str, reference_text: Optional[str] = None, les
 
 def _speaking_strengths(pronunciation: int, sentence: int, diacritics: int, grammar: int, word_count: int) -> list:
     s = []
-    if pronunciation >= 80: s.append("🗣️ نُطْقُكَ وَاضِحٌ وَمَفْهُومٌ تَمَامًا")
+    if pronunciation >= 80: s.append("🗣️ كَلَامُكَ وَاضِحٌ وَمَفْهُومٌ تَمَامًا")
     if sentence >= 80:      s.append("📝 جُمَلُكَ مُرَتَّبَةٌ وَمُتَسَلْسِلَةٌ بِشَكْلٍ جَيِّدٍ")
     if diacritics >= 80:    s.append("🔤 اسْتَخْدَمْتَ التَّشْكِيلَ الصَّحِيحَ فِي مُعْظَمِ الْكَلِمَاتِ")
     if grammar >= 80:       s.append("✅ تَرْكِيبُكَ النَّحْوِيُّ سَلِيمٌ")
@@ -528,6 +535,10 @@ def _generate_opinion_feedback(overall: int, reasons_found: int, has_opener: boo
 
 
 def _evaluate_pronunciation(transcript: str, reference: Optional[str]) -> int:
+    # تنبيه: رغم اسم الدالة/الحقل التاريخي، هذا ليس تحليلًا صوتيًا للنطق ولا لمخارج
+    # الحروف. هو مؤشر "وضوح الكلام كما تعرّف عليه النظام" محسوب من النص الناتج
+    # (تطابق الكلمات مع المرجع، أو نسبة الحروف العربية). نُبقي اسم الحقل
+    # `pronunciation` في الـAPI للتوافق الخلفي فقط، والواجهة تعرضه بوصف دقيق.
     if not reference:
         arabic_chars = len(re.findall(r'[\u0600-\u06FF]', transcript))
         total_chars  = max(len(transcript.replace(" ", "")), 1)
@@ -574,7 +585,7 @@ def _evaluate_grammar(transcript: str) -> int:
 
 def _generate_feedback(overall: int, pronunciation: int, structure: int) -> str:
     if overall >= 85: return "ممتاز! أداؤك رائع في التحدث باللغة العربية."
-    elif overall >= 70: return "جيد جداً! يمكنك تحسين النطق أكثر بالتدريب المستمر."
+    elif overall >= 70: return "جيد جداً! يمكنك تحسين وضوح كلامك أكثر بالتدريب المستمر."
     elif overall >= 55: return "جيد! ركّز على بناء الجمل الكاملة وإضافة أدوات الربط."
     else: return "استمر في التدريب! حاول التحدث بجمل أطول وأكثر وضوحاً."
 

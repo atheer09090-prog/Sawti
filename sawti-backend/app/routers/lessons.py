@@ -1,15 +1,23 @@
 """
-إدارة الدروس والمواضيع — يحفظ في ملف JSON على السيرفر
+إدارة الدروس والمواضيع.
+
+يُحفَظ المحتوى القابل للتعديل من لوحة المعلم في PostgreSQL (جدول
+content_store عبر app/services/content_store.py) وليس في ملفات على قرص
+الخادم، حتى لا تضيع التعديلات عند إعادة النشر. شكل JSON الذي تعيده
+الواجهات لم يتغير.
 """
-import json
 import os
-from fastapi import APIRouter, HTTPException
+import copy
+from fastapi import APIRouter, HTTPException, Depends
+from app.services.current_user import require_teacher
+from app.services import content_store
 from pydantic import BaseModel
 from typing import List, Optional
 
 router = APIRouter()
 
-DATA_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "lessons.json")
+# كل عمليات التعديل (POST/PUT/DELETE) للمعلم فقط؛ الـGET يبقى مفتوحًا لأن الطالب يقرأ منه.
+TEACHER_ONLY = [Depends(require_teacher)]
 
 # البيانات الافتراضية
 DEFAULT_DATA = {
@@ -63,18 +71,15 @@ DEFAULT_DATA = {
 
 
 def _read() -> dict:
-    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-    if not os.path.exists(DATA_FILE):
-        _write(DEFAULT_DATA)
-        return DEFAULT_DATA
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return {
+        "speaking": content_store.get("speaking", lambda: DEFAULT_DATA["speaking"]),
+        "writing": content_store.get("writing", lambda: DEFAULT_DATA["writing"]),
+    }
 
 
 def _write(data: dict):
-    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    content_store.put("speaking", data["speaking"])
+    content_store.put("writing", data["writing"])
 
 
 # ── Models ──
@@ -104,7 +109,7 @@ def get_speaking_lessons():
 def get_writing_topics():
     return _read()["writing"]
 
-@router.post("/speaking")
+@router.post("/speaking", dependencies=TEACHER_ONLY)
 def add_speaking_lesson(lesson: SpeakingLesson):
     data = _read()
     # تحقق من عدم تكرار الـ id
@@ -114,7 +119,7 @@ def add_speaking_lesson(lesson: SpeakingLesson):
     _write(data)
     return {"ok": True}
 
-@router.post("/writing")
+@router.post("/writing", dependencies=TEACHER_ONLY)
 def add_writing_topic(topic: WritingTopic):
     data = _read()
     if any(t["id"] == topic.id for t in data["writing"]):
@@ -123,7 +128,7 @@ def add_writing_topic(topic: WritingTopic):
     _write(data)
     return {"ok": True}
 
-@router.put("/speaking/{lesson_id}")
+@router.put("/speaking/{lesson_id}", dependencies=TEACHER_ONLY)
 def update_speaking_lesson(lesson_id: str, lesson: SpeakingLesson):
     data = _read()
     for i, l in enumerate(data["speaking"]):
@@ -133,7 +138,7 @@ def update_speaking_lesson(lesson_id: str, lesson: SpeakingLesson):
             return {"ok": True}
     raise HTTPException(404, "الدرس غير موجود")
 
-@router.put("/writing/{topic_id}")
+@router.put("/writing/{topic_id}", dependencies=TEACHER_ONLY)
 def update_writing_topic(topic_id: str, topic: WritingTopic):
     data = _read()
     for i, t in enumerate(data["writing"]):
@@ -143,14 +148,14 @@ def update_writing_topic(topic_id: str, topic: WritingTopic):
             return {"ok": True}
     raise HTTPException(404, "الموضوع غير موجود")
 
-@router.delete("/speaking/{lesson_id}")
+@router.delete("/speaking/{lesson_id}", dependencies=TEACHER_ONLY)
 def delete_speaking_lesson(lesson_id: str):
     data = _read()
     data["speaking"] = [l for l in data["speaking"] if l["id"] != lesson_id]
     _write(data)
     return {"ok": True}
 
-@router.delete("/writing/{topic_id}")
+@router.delete("/writing/{topic_id}", dependencies=TEACHER_ONLY)
 def delete_writing_topic(topic_id: str):
     data = _read()
     data["writing"] = [t for t in data["writing"] if t["id"] != topic_id]
@@ -174,20 +179,11 @@ DEFAULT_SELF_LEARNING = {
     ],
 }
 
-SL_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "self_learning.json")
-
 def _read_sl() -> dict:
-    os.makedirs(os.path.dirname(SL_FILE), exist_ok=True)
-    if not os.path.exists(SL_FILE):
-        _write_sl(DEFAULT_SELF_LEARNING)
-        return DEFAULT_SELF_LEARNING
-    with open(SL_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return content_store.get("self_learning", lambda: DEFAULT_SELF_LEARNING)
 
 def _write_sl(data: dict):
-    os.makedirs(os.path.dirname(SL_FILE), exist_ok=True)
-    with open(SL_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    content_store.put("self_learning", data)
 
 
 class QuizQuestion(BaseModel):
@@ -208,14 +204,14 @@ class FillInQuestion(BaseModel):
 def get_self_learning():
     return _read_sl()
 
-@router.post("/self-learning/quiz")
+@router.post("/self-learning/quiz", dependencies=TEACHER_ONLY)
 def add_quiz_question(q: QuizQuestion):
     data = _read_sl()
     data["quiz"].append(q.dict())
     _write_sl(data)
     return {"ok": True}
 
-@router.put("/self-learning/quiz/{idx}")
+@router.put("/self-learning/quiz/{idx}", dependencies=TEACHER_ONLY)
 def update_quiz_question(idx: int, q: QuizQuestion):
     data = _read_sl()
     if idx >= len(data["quiz"]):
@@ -224,7 +220,7 @@ def update_quiz_question(idx: int, q: QuizQuestion):
     _write_sl(data)
     return {"ok": True}
 
-@router.delete("/self-learning/quiz/{idx}")
+@router.delete("/self-learning/quiz/{idx}", dependencies=TEACHER_ONLY)
 def delete_quiz_question(idx: int):
     data = _read_sl()
     if idx >= len(data["quiz"]):
@@ -233,14 +229,14 @@ def delete_quiz_question(idx: int):
     _write_sl(data)
     return {"ok": True}
 
-@router.post("/self-learning/word-order")
+@router.post("/self-learning/word-order", dependencies=TEACHER_ONLY)
 def add_word_order(q: WordOrderQuestion):
     data = _read_sl()
     data["word_order"].append(q.dict())
     _write_sl(data)
     return {"ok": True}
 
-@router.put("/self-learning/word-order/{idx}")
+@router.put("/self-learning/word-order/{idx}", dependencies=TEACHER_ONLY)
 def update_word_order(idx: int, q: WordOrderQuestion):
     data = _read_sl()
     if idx >= len(data["word_order"]):
@@ -249,7 +245,7 @@ def update_word_order(idx: int, q: WordOrderQuestion):
     _write_sl(data)
     return {"ok": True}
 
-@router.delete("/self-learning/word-order/{idx}")
+@router.delete("/self-learning/word-order/{idx}", dependencies=TEACHER_ONLY)
 def delete_word_order(idx: int):
     data = _read_sl()
     if idx >= len(data["word_order"]):
@@ -258,14 +254,14 @@ def delete_word_order(idx: int):
     _write_sl(data)
     return {"ok": True}
 
-@router.post("/self-learning/fill-in")
+@router.post("/self-learning/fill-in", dependencies=TEACHER_ONLY)
 def add_fill_in(q: FillInQuestion):
     data = _read_sl()
     data["fill_in"].append(q.dict())
     _write_sl(data)
     return {"ok": True}
 
-@router.put("/self-learning/fill-in/{idx}")
+@router.put("/self-learning/fill-in/{idx}", dependencies=TEACHER_ONLY)
 def update_fill_in(idx: int, q: FillInQuestion):
     data = _read_sl()
     if idx >= len(data["fill_in"]):
@@ -274,7 +270,7 @@ def update_fill_in(idx: int, q: FillInQuestion):
     _write_sl(data)
     return {"ok": True}
 
-@router.delete("/self-learning/fill-in/{idx}")
+@router.delete("/self-learning/fill-in/{idx}", dependencies=TEACHER_ONLY)
 def delete_fill_in(idx: int):
     data = _read_sl()
     if idx >= len(data["fill_in"]):
@@ -285,8 +281,6 @@ def delete_fill_in(idx: int):
 
 
 # ── Writing Games ──
-
-GAMES_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "writing_games.json")
 
 DEFAULT_GAMES = {
     "middle_hamza": [
@@ -311,18 +305,11 @@ DEFAULT_GAMES = {
 
 
 def _read_games() -> dict:
-    os.makedirs(os.path.dirname(GAMES_FILE), exist_ok=True)
-    if not os.path.exists(GAMES_FILE):
-        _write_games(DEFAULT_GAMES)
-        return DEFAULT_GAMES
-    with open(GAMES_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return content_store.get("games", lambda: DEFAULT_GAMES)
 
 
 def _write_games(data: dict):
-    os.makedirs(os.path.dirname(GAMES_FILE), exist_ok=True)
-    with open(GAMES_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    content_store.put("games", data)
 
 
 class MiddleHamzaQ(BaseModel):
@@ -353,14 +340,14 @@ def get_games():
     return _read_games()
 
 # Middle Hamza
-@router.post("/games/middle-hamza")
+@router.post("/games/middle-hamza", dependencies=TEACHER_ONLY)
 def add_middle_hamza(q: MiddleHamzaQ):
     data = _read_games()
     data["middle_hamza"].append(q.dict())
     _write_games(data)
     return {"ok": True}
 
-@router.put("/games/middle-hamza/{idx}")
+@router.put("/games/middle-hamza/{idx}", dependencies=TEACHER_ONLY)
 def update_middle_hamza(idx: int, q: MiddleHamzaQ):
     data = _read_games()
     if idx >= len(data["middle_hamza"]): raise HTTPException(404, "غير موجود")
@@ -368,7 +355,7 @@ def update_middle_hamza(idx: int, q: MiddleHamzaQ):
     _write_games(data)
     return {"ok": True}
 
-@router.delete("/games/middle-hamza/{idx}")
+@router.delete("/games/middle-hamza/{idx}", dependencies=TEACHER_ONLY)
 def delete_middle_hamza(idx: int):
     data = _read_games()
     data["middle_hamza"].pop(idx)
@@ -376,14 +363,14 @@ def delete_middle_hamza(idx: int):
     return {"ok": True}
 
 # End Hamza
-@router.post("/games/end-hamza")
+@router.post("/games/end-hamza", dependencies=TEACHER_ONLY)
 def add_end_hamza(q: EndHamzaQ):
     data = _read_games()
     data["end_hamza"].append(q.dict())
     _write_games(data)
     return {"ok": True}
 
-@router.put("/games/end-hamza/{idx}")
+@router.put("/games/end-hamza/{idx}", dependencies=TEACHER_ONLY)
 def update_end_hamza(idx: int, q: EndHamzaQ):
     data = _read_games()
     if idx >= len(data["end_hamza"]): raise HTTPException(404, "غير موجود")
@@ -391,7 +378,7 @@ def update_end_hamza(idx: int, q: EndHamzaQ):
     _write_games(data)
     return {"ok": True}
 
-@router.delete("/games/end-hamza/{idx}")
+@router.delete("/games/end-hamza/{idx}", dependencies=TEACHER_ONLY)
 def delete_end_hamza(idx: int):
     data = _read_games()
     data["end_hamza"].pop(idx)
@@ -399,14 +386,14 @@ def delete_end_hamza(idx: int):
     return {"ok": True}
 
 # Quick Quiz
-@router.post("/games/quick-quiz")
+@router.post("/games/quick-quiz", dependencies=TEACHER_ONLY)
 def add_quick_quiz(q: QuickQuizQ):
     data = _read_games()
     data["quick_quiz"].append(q.dict())
     _write_games(data)
     return {"ok": True}
 
-@router.put("/games/quick-quiz/{idx}")
+@router.put("/games/quick-quiz/{idx}", dependencies=TEACHER_ONLY)
 def update_quick_quiz(idx: int, q: QuickQuizQ):
     data = _read_games()
     if idx >= len(data["quick_quiz"]): raise HTTPException(404, "غير موجود")
@@ -414,7 +401,7 @@ def update_quick_quiz(idx: int, q: QuickQuizQ):
     _write_games(data)
     return {"ok": True}
 
-@router.delete("/games/quick-quiz/{idx}")
+@router.delete("/games/quick-quiz/{idx}", dependencies=TEACHER_ONLY)
 def delete_quick_quiz(idx: int):
     data = _read_games()
     data["quick_quiz"].pop(idx)
@@ -423,8 +410,6 @@ def delete_quick_quiz(idx: int):
 
 
 # ── Dictation Journey ──
-
-DICTATION_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "dictation.json")
 
 DEFAULT_DICTATION = [
     {"word": "بِئْرٌ", "type": "الْهَمْزَةُ الْمُتَوَسِّطَةُ", "correct": "بِئْرٌ", "opts": ["بِيرٌ", "بِئْرٌ", "بِيئَرٌ", "بِئَرٌ"], "hint": "الْهَمْزَةُ عَلَى نَبْرَةٍ لِأَنَّ مَا قَبْلَهَا كَسْرَةٌ", "img": "https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=600&q=80"},
@@ -441,18 +426,11 @@ DEFAULT_DICTATION = [
 
 
 def _read_dictation() -> list:
-    os.makedirs(os.path.dirname(DICTATION_FILE), exist_ok=True)
-    if not os.path.exists(DICTATION_FILE):
-        _write_dictation(DEFAULT_DICTATION)
-        return DEFAULT_DICTATION
-    with open(DICTATION_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return content_store.get("dictation", lambda: DEFAULT_DICTATION)
 
 
 def _write_dictation(data: list):
-    os.makedirs(os.path.dirname(DICTATION_FILE), exist_ok=True)
-    with open(DICTATION_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    content_store.put("dictation", data)
 
 
 class DictationQuestion(BaseModel):
@@ -468,14 +446,14 @@ class DictationQuestion(BaseModel):
 def get_dictation():
     return _read_dictation()
 
-@router.post("/dictation")
+@router.post("/dictation", dependencies=TEACHER_ONLY)
 def add_dictation(q: DictationQuestion):
     data = _read_dictation()
     data.append(q.dict())
     _write_dictation(data)
     return {"ok": True}
 
-@router.put("/dictation/{idx}")
+@router.put("/dictation/{idx}", dependencies=TEACHER_ONLY)
 def update_dictation(idx: int, q: DictationQuestion):
     data = _read_dictation()
     if idx >= len(data): raise HTTPException(404, "غير موجود")
@@ -483,7 +461,7 @@ def update_dictation(idx: int, q: DictationQuestion):
     _write_dictation(data)
     return {"ok": True}
 
-@router.delete("/dictation/{idx}")
+@router.delete("/dictation/{idx}", dependencies=TEACHER_ONLY)
 def delete_dictation(idx: int):
     data = _read_dictation()
     data.pop(idx)
@@ -493,7 +471,9 @@ def delete_dictation(idx: int):
 
 # ── Hamza Games (WritingGames) ──
 
-HAMZA_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "hamza_games.json")
+# ملف مرفق مع المشروع يحوي المحتوى الافتراضي الحقيقي لألعاب الهمزة: يُستخدم
+# للبذر الأول فقط (قراءة فقط) — لا يُكتب عليه أبدًا؛ التعديلات تُحفَظ في القاعدة.
+HAMZA_SEED_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "hamza_games.json")
 
 DEFAULT_HAMZA = {
     "l1_gate":     [],
@@ -510,18 +490,14 @@ VALID_KEYS = set(DEFAULT_HAMZA.keys())
 
 
 def _read_hamza() -> dict:
-    os.makedirs(os.path.dirname(HAMZA_FILE), exist_ok=True)
-    if not os.path.exists(HAMZA_FILE):
-        _write_hamza(DEFAULT_HAMZA)
-        return DEFAULT_HAMZA
-    with open(HAMZA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    data = content_store.get("hamza_games", lambda: DEFAULT_HAMZA, seed_file=HAMZA_SEED_FILE)
+    for k in VALID_KEYS:  # مفتاح ناقص لا يكسر الإضافة/التعديل
+        data.setdefault(k, [])
+    return data
 
 
 def _write_hamza(data: dict):
-    os.makedirs(os.path.dirname(HAMZA_FILE), exist_ok=True)
-    with open(HAMZA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    content_store.put("hamza_games", data)
 
 
 @router.get("/hamza-games")
@@ -529,7 +505,7 @@ def get_hamza_games():
     return _read_hamza()
 
 
-@router.post("/hamza-games/{key}")
+@router.post("/hamza-games/{key}", dependencies=TEACHER_ONLY)
 def add_hamza_item(key: str, item: dict):
     if key not in VALID_KEYS:
         raise HTTPException(400, f"مفتاح غير صالح: {key}")
@@ -539,7 +515,7 @@ def add_hamza_item(key: str, item: dict):
     return {"ok": True}
 
 
-@router.put("/hamza-games/{key}/{idx}")
+@router.put("/hamza-games/{key}/{idx}", dependencies=TEACHER_ONLY)
 def update_hamza_item(key: str, idx: int, item: dict):
     if key not in VALID_KEYS:
         raise HTTPException(400, f"مفتاح غير صالح: {key}")
@@ -551,7 +527,7 @@ def update_hamza_item(key: str, idx: int, item: dict):
     return {"ok": True}
 
 
-@router.delete("/hamza-games/{key}/{idx}")
+@router.delete("/hamza-games/{key}/{idx}", dependencies=TEACHER_ONLY)
 def delete_hamza_item(key: str, idx: int):
     if key not in VALID_KEYS:
         raise HTTPException(400, f"مفتاح غير صالح: {key}")
@@ -570,8 +546,6 @@ def delete_hamza_item(key: str, idx: int):
 # محفوظ كـ JSON خام (بدون نموذج Pydantic صارم) لأن شكل الحقول يختلف
 # بين الرحلات الثلاث (word pairs / نص مع صح-خطأ / إلخ).
 # ══════════════════════════════════════════════════════════════════
-JOURNEYS_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "hamza_journeys.json")
-
 DEFAULT_JOURNEYS = {
     "l1": {
         "rule": "تُكتب الهمزة المتوسطة على ياء إذا كانت مكسورة، أو كان الحرف الذي قبلها مكسورًا، أو سُبقت بياء ساكنة وكانت الهمزة مفتوحة أو مضمومة — لأن الكسرة أقوى الحركات.",
@@ -667,24 +641,17 @@ DEFAULT_JOURNEYS = {
 
 
 def _read_journeys() -> dict:
-    os.makedirs(os.path.dirname(JOURNEYS_FILE), exist_ok=True)
-    if not os.path.exists(JOURNEYS_FILE):
-        _write_journeys(DEFAULT_JOURNEYS)
-        return DEFAULT_JOURNEYS
-    with open(JOURNEYS_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    data = content_store.get("hamza_journeys", lambda: DEFAULT_JOURNEYS)
     # دمج أي حقول ناقصة (مثلاً بعد تحديث الكود بحقول جديدة) مع الافتراضي
     for jid, defaults in DEFAULT_JOURNEYS.items():
         data.setdefault(jid, {})
         for k, v in defaults.items():
-            data[jid].setdefault(k, v)
+            data[jid].setdefault(k, copy.deepcopy(v))
     return data
 
 
 def _write_journeys(data: dict):
-    os.makedirs(os.path.dirname(JOURNEYS_FILE), exist_ok=True)
-    with open(JOURNEYS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    content_store.put("hamza_journeys", data)
 
 
 @router.get("/hamza-journeys")
@@ -692,7 +659,7 @@ def get_hamza_journeys():
     return _read_journeys()
 
 
-@router.put("/hamza-journeys/{journey_id}")
+@router.put("/hamza-journeys/{journey_id}", dependencies=TEACHER_ONLY)
 def update_hamza_journey(journey_id: str, data: dict):
     if journey_id not in DEFAULT_JOURNEYS:
         raise HTTPException(400, f"رحلة غير صالحة: {journey_id}")
@@ -702,11 +669,11 @@ def update_hamza_journey(journey_id: str, data: dict):
     return {"ok": True}
 
 
-@router.put("/hamza-journeys/{journey_id}/reset")
+@router.put("/hamza-journeys/{journey_id}/reset", dependencies=TEACHER_ONLY)
 def reset_hamza_journey(journey_id: str):
     if journey_id not in DEFAULT_JOURNEYS:
         raise HTTPException(400, f"رحلة غير صالحة: {journey_id}")
     journeys = _read_journeys()
-    journeys[journey_id] = DEFAULT_JOURNEYS[journey_id]
+    journeys[journey_id] = copy.deepcopy(DEFAULT_JOURNEYS[journey_id])
     _write_journeys(journeys)
     return {"ok": True}

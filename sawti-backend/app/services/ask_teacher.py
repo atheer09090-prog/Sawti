@@ -29,6 +29,10 @@ def _trim_to_last_complete_sentence(text: str) -> str:
     return text[: best_cut + 1].strip()
 
 
+class TeacherUnavailable(Exception):
+    """المعلم الذكي (Gemini) غير متاح الآن — تتحول لـ 503 بدل إرجاع اعتذار كأنه إجابة."""
+
+
 def answer_student_question(question: str) -> str:
     question = (question or "").strip()
     if not question:
@@ -38,7 +42,8 @@ def answer_student_question(question: str) -> str:
 
     api_key = os.getenv("GEMINI_API_KEY", "")
     if not api_key:
-        return "عُذْرًا، الْمُعَلِّمُ الذَّكِيُّ غَيْرُ مُتَاحٍ حَالِيًّا. حَاوِلْ مَرَّةً أُخْرَى لَاحِقًا."
+        logger.error("Ask teacher: GEMINI_API_KEY غير مضبوط")
+        raise TeacherUnavailable("GEMINI_API_KEY not configured")
 
     # تعليمات صارمة ومباشرة — التجربة أظهرت أن النموذج قد يفتح بمقدمات
     # حماسية طويلة، أو يقطع الجملة الأخيرة، أو يُسرّب كلمات إنجليزية/
@@ -112,7 +117,7 @@ def answer_student_question(question: str) -> str:
         # راجع سجلّات Render لرؤية النص الكامل القادم من Google.
         body = e.read().decode("utf-8", errors="replace") if hasattr(e, "read") else ""
         logger.error("Gemini HTTPError %s: %s", e.code, body[:500])
-        return "تَعَذَّرَ الِاتِّصَالُ بِالْمُعَلِّمِ الذَّكِيِّ الْآنَ. حَاوِلْ مَرَّةً أُخْرَى بَعْدَ قَلِيلٍ 🌱"
+        raise TeacherUnavailable(f"Gemini HTTP {e.code}") from e
     except Exception as e:
         logger.error("Gemini request failed: %s: %s", type(e).__name__, e)
-        return "تَعَذَّرَ الِاتِّصَالُ بِالْمُعَلِّمِ الذَّكِيِّ الْآنَ. حَاوِلْ مَرَّةً أُخْرَى بَعْدَ قَلِيلٍ 🌱"
+        raise TeacherUnavailable(type(e).__name__) from e

@@ -28,7 +28,11 @@ def get_conn():
     """اتصال جديد بقاعدة البيانات. المتصل مسؤول عن إغلاقه (conn.close())."""
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL غير مضبوط")
-    # sslmode=require مطلوب لمعظم مزوّدي Postgres السحابيين (مثل Supabase)
+    # sslmode=require مطلوب لمعظم مزوّدي Postgres السحابيين (مثل Supabase).
+    # إن حدّد الرابط sslmode صراحةً (مثلًا sslmode=disable لقاعدة محلية في
+    # الاختبارات) نحترم ما فيه ولا نفرض require.
+    if "sslmode=" in DATABASE_URL:
+        return psycopg2.connect(DATABASE_URL, connect_timeout=10)
     return psycopg2.connect(DATABASE_URL, sslmode="require", connect_timeout=10)
 
 

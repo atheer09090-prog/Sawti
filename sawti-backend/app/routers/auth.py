@@ -17,17 +17,35 @@ import uuid
 import json
 import secrets
 import logging
-from fastapi import APIRouter, HTTPException, Depends
+import hmac
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, EmailStr, field_validator
 
 from app.services import db
-from app.services.security import hash_password, verify_password, create_token
+from app.services.security import (
+    hash_password, verify_password, create_token, create_teacher_token,
+    TEACHER_TOKEN_TTL_SECONDS,
+)
 from app.services.current_user import get_current_user_id
+from app.services import rate_limit
 
 router = APIRouter()
 logger = logging.getLogger("sawti.auth")
 
-TEACHER_ACCESS_CODE = os.getenv("TEACHER_ACCESS_CODE", "sawti2026")
+# لا قيمة افتراضية إطلاقًا: إن لم يُضبَط TEACHER_ACCESS_CODE يُغلق دخول المعلم
+# كليًا (انظر teacher_login). تُقرأ القيمة عند كل طلب لا عند الاستيراد.
+def _teacher_code() -> str:
+    return os.getenv("TEACHER_ACCESS_CODE", "").strip()
+
+
+if not _teacher_code():
+    logger.error(
+        "Auth: TEACHER_ACCESS_CODE غير مضبوط — دخول المعلم معطَّل حتى تضبطه "
+        "في متغيرات البيئة. لا يوجد رمز افتراضي."
+    )
+
+# حدود المحاولات: تخمين رمز المعلم (فشل) وإنشاء الحسابات
+_TEACHER_FAIL_MAX, _TEACHER_FAIL_WINDOW = 5, 15 * 60
 
 _CREATE_USERS_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS users (
@@ -85,15 +103,38 @@ def _require_db():
 
 
 @router.post("/teacher-login")
-def teacher_login(payload: dict):
+def teacher_login(payload: dict, request: Request):
+    """
+    يتحقق من رمز المعلم ويُصدر JWT خاصًا به (role=teacher، صالح 8 ساعات).
+    كل مسارات لوحة المعلم الحساسة تتحقق من هذا الرمز عبر require_teacher.
+    """
+    expected = _teacher_code()
+    if not expected:
+        logger.error("Auth: محاولة دخول معلم لكن TEACHER_ACCESS_CODE غير مضبوط")
+        raise HTTPException(503, "دخول المعلم غير مفعَّل على الخادم حاليًا")
+
+    ip_key = f"teacher-fail:{rate_limit.client_ip(request)}"
+    if rate_limit.is_blocked(ip_key, _TEACHER_FAIL_MAX, _TEACHER_FAIL_WINDOW):
+        raise HTTPException(429, "محاولات خاطئة كثيرة، حاول مرة أخرى بعد قليل",
+                            headers={"Retry-After": str(_TEACHER_FAIL_WINDOW)})
+
     code = str(payload.get("code", "")).strip()
-    if not code or code != TEACHER_ACCESS_CODE:
+    # مقارنة بزمن ثابت لتفادي تسريب معلومات عبر زمن الاستجابة
+    if not code or not hmac.compare_digest(code.encode("utf-8"), expected.encode("utf-8")):
+        rate_limit.record_hit(ip_key)
         raise HTTPException(401, "رمز الدخول غير صحيح")
-    return {"ok": True}
+
+    rate_limit.reset(ip_key)
+    return {
+        "ok": True,
+        "token": create_teacher_token(),
+        "expires_in": TEACHER_TOKEN_TTL_SECONDS,
+        "name": "المعلم",
+    }
 
 
 @router.post("/guest-login")
-def guest_login():
+def guest_login(request: Request):
     """
     دخول تجريبي فوري بلا بريد إلكتروني ولا كلمة مرور — مخصَّص لأعضاء
     لجنة التحكيم أو أي زائر يريد استكشاف البرنامج بسرعة. كل ضغطة على
@@ -102,6 +143,8 @@ def guest_login():
     ويكتب كل واحد فوق تقدّم الآخر.
     """
     _require_db()
+    # حد سخي (لجنة التحكيم/مدرسة قد تتشارك IP واحدًا) لكنه يمنع إغراق الجدول بحسابات وهمية
+    rate_limit.check_limit(f"guest:{rate_limit.client_ip(request)}", 60, 3600)
     db.ensure_table("users", _CREATE_USERS_TABLE_SQL)
 
     user_id = str(uuid.uuid4())
@@ -134,9 +177,11 @@ def guest_login():
 
 
 @router.post("/register")
-def register(payload: RegisterPayload):
+def register(payload: RegisterPayload, request: Request):
     """إنشاء حساب طالب جديد. يرجع رمز جلسة (token) فور النجاح."""
     _require_db()
+    # 60/ساعة لكل IP: حصة دراسية كاملة قد تسجّل من شبكة مدرسة واحدة
+    rate_limit.check_limit(f"register:{rate_limit.client_ip(request)}", 60, 3600)
     db.ensure_table("users", _CREATE_USERS_TABLE_SQL)
 
     email = _normalize_email(payload.email)
@@ -182,10 +227,18 @@ def register(payload: RegisterPayload):
 
 
 @router.post("/login")
-def login(payload: LoginPayload):
+def login(payload: LoginPayload, request: Request):
     _require_db()
     db.ensure_table("users", _CREATE_USERS_TABLE_SQL)
     email = _normalize_email(payload.email)
+
+    # نحدّ المحاولات الفاشلة فقط (لا الناجحة) — لمنع تخمين كلمات المرور دون أن
+    # نُعطّل صفًّا كاملًا يسجّل دخوله معًا من IP واحد.
+    email_key = f"login-fail-email:{email}"
+    ip_key = f"login-fail-ip:{rate_limit.client_ip(request)}"
+    if rate_limit.is_blocked(email_key, 8, 15 * 60) or rate_limit.is_blocked(ip_key, 60, 15 * 60):
+        raise HTTPException(429, "محاولات دخول خاطئة كثيرة. انتظر بضع دقائق ثم حاول مرة أخرى.",
+                            headers={"Retry-After": str(15 * 60)})
 
     conn = db.get_conn()
     try:
@@ -202,10 +255,14 @@ def login(payload: LoginPayload):
         # 404 (لا 401) لأن السبب هنا مختلف تمامًا: لا يوجد حساب أصلًا،
         # وليس أن كلمة المرور خاطئة — الواجهة تستخدم هذا الفرق لتوجيه
         # الطالب مباشرة لإنشاء حساب جديد بدل تكرار محاولة الدخول.
+        rate_limit.record_hit(ip_key)
         raise HTTPException(404, "لا يوجد حساب بهذا البريد الإلكتروني")
     if not verify_password(payload.password, row[4]):
+        rate_limit.record_hit(email_key)
+        rate_limit.record_hit(ip_key)
         raise HTTPException(401, "كلمة المرور غير صحيحة")
 
+    rate_limit.reset(email_key)
     user_id, name, grade, avatar, _ = row
     token = create_token(user_id)
     return {"ok": True, "token": token, "user": {"id": user_id, "name": name, "grade": grade, "avatar": avatar, "email": email}}

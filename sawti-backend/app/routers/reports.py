@@ -1,4 +1,5 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from app.services.current_user import require_teacher
 from fastapi.responses import Response
 from pydantic import BaseModel
 from urllib.parse import quote
@@ -18,10 +19,10 @@ class StudentReportRequest(BaseModel):
     stars: int = 0
 
 
-@router.post("/student")
+@router.post("/student", dependencies=[Depends(require_teacher)])
 def generate_report(student: StudentReportRequest):
     """
-    توليد تقرير PDF لأداء الطالب
+    توليد تقرير PDF لأداء الطالب — للمعلم فقط (يُنشئ تقريرًا لأي اسم يُرسَل إليه).
     """
     pdf_bytes = generate_student_report(student.model_dump())
     # ملاحظة مهمة: رؤوس HTTP (headers) يجب أن تكون قابلة للترميز بـ
