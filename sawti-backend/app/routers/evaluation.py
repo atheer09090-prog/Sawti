@@ -1,6 +1,8 @@
 import logging
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form, Query
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
+from app.services.current_user import get_student_or_teacher
 from app.services.ai_guard import ai_limit
 from app.services.speech_eval import transcribe_arabic_audio_detailed, evaluate_speaking, correct_stt_errors
 from app.services.writing_eval import evaluate_writing
@@ -123,11 +125,19 @@ def spellcheck_endpoint(request: SpellCheckRequest):
 
 @router.post("/speech", dependencies=[Depends(ai_limit("speech", 15))])
 async def evaluate_speech_endpoint(
-    student_id: int = 0,
-    lesson_id: str = "",
-    reference_text: str = "",
+    student_id: int | None = Form(None),
+    lesson_id: str | None = Form(None),
+    reference_text: str | None = Form(None),
     audio_file: UploadFile = File(...),
+    query_student_id: int = Query(0, alias="student_id"),
+    query_lesson_id: str = Query("", alias="lesson_id"),
+    query_reference_text: str = Query("", alias="reference_text"),
+    identity: str = Depends(get_student_or_teacher),
 ):
+    # Browser uploads use multipart fields; retain compatibility with older query clients.
+    student_id = student_id if student_id is not None else query_student_id
+    lesson_id = lesson_id if lesson_id is not None else query_lesson_id
+    reference_text = reference_text if reference_text is not None else query_reference_text
     content_type = (audio_file.content_type or "").split(";")[0].strip().lower()
     allowed_types = ["audio/wav", "audio/mp3", "audio/webm", "audio/mpeg", "audio/ogg",
                       "audio/x-wav", "audio/wave", "audio/mp4", "audio/x-m4a", "audio/m4a"]
@@ -153,17 +163,18 @@ async def evaluate_speech_endpoint(
                 lesson_id, content_type or "unknown", audio_format, len(audio_bytes))
 
     try:
-        stt = transcribe_arabic_audio_detailed(audio_bytes, audio_format, topic_hint=reference_text)
+        stt = await run_in_threadpool(transcribe_arabic_audio_detailed, audio_bytes, audio_format, topic_hint=reference_text)
         whisper_text = stt["whisper_text"]   # ما قاله Whisper حرفيًا
         transcript = stt["rules_text"]       # بعد طبقة القواعد الصوتية (المدخل لتصحيح Gemini)
 
         # مرحلة مستقلة: تصحيح أخطاء التعرف الآلي على الكلام فقط (وليست أخطاء
         # الطالب اللغوية) — التقييم يعتمد بعدها على النص المُصحَّح (canonical
         # transcript) حصرياً، وبذلك لا يُعاقَب الطالب على خطأ Whisper.
-        stt_fix = correct_stt_errors(transcript, topic_hint=reference_text)
+        stt_fix = await run_in_threadpool(correct_stt_errors, transcript, topic_hint=reference_text)
         corrected_transcript = stt_fix["correctedText"]
 
-        result = evaluate_speaking(corrected_transcript, reference_text or None, lesson_id)
+        result = await run_in_threadpool(evaluate_speaking, corrected_transcript, reference_text or None, lesson_id)
+        result["user_id"] = identity
         result["student_id"] = student_id
         result["lesson_id"] = lesson_id
         # الحقول التالية كانت موجودة سابقاً ولم تتغير أسماؤها أو معانيها (توافق خلفي):

@@ -1,5 +1,5 @@
 """
-مصادقة المنصة، وفيها نوعان مختلفان تمامًا من الدخول:
+مصادقة البرنامج، وفيها نوعان مختلفان تمامًا من الدخول:
 
 1) دخول المعلم: رمز وصول واحد مشترك (كما كان)، بدون حساب فردي.
 2) حسابات الطلاب: تسجيل/دخول حقيقي بالبريد وكلمة المرور، لكل طالب حساب
@@ -18,7 +18,7 @@ import json
 import secrets
 import logging
 import hmac
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request, Header
 from pydantic import BaseModel, EmailStr, field_validator
 
 from app.services import db
@@ -26,7 +26,7 @@ from app.services.security import (
     hash_password, verify_password, create_token, create_teacher_token,
     TEACHER_TOKEN_TTL_SECONDS,
 )
-from app.services.current_user import get_current_user_id
+from app.services.current_user import get_current_user_id, require_teacher
 from app.services import rate_limit
 
 router = APIRouter()
@@ -82,6 +82,8 @@ class RegisterPayload(BaseModel):
     def _password_len(cls, v: str) -> str:
         if len(v) < 6:
             raise ValueError("كلمة المرور يجب ألا تقل عن 6 أحرف")
+        if len(v.encode("utf-8")) > 72:
+            raise ValueError("كلمة المرور أطول من المسموح؛ استخدم 72 بايت كحد أقصى")
         return v
 
     @field_validator("name", "grade")
@@ -177,8 +179,14 @@ def guest_login(request: Request):
 
 
 @router.post("/register")
-def register(payload: RegisterPayload, request: Request):
+def register(payload: RegisterPayload, request: Request, authorization: str | None = Header(default=None)):
     """إنشاء حساب طالب جديد. يرجع رمز جلسة (token) فور النجاح."""
+    if payload.legacy_name or payload.legacy_grade:
+        # A name and class are public identifiers, not proof of record ownership.
+        # Keep migration available to an authenticated teacher only.
+        require_teacher(authorization)
+        if not payload.legacy_name or not payload.legacy_grade:
+            raise HTTPException(422, "يلزم اسم الطالب وصفه لترحيل سجله")
     _require_db()
     # 60/ساعة لكل IP: حصة دراسية كاملة قد تسجّل من شبكة مدرسة واحدة
     rate_limit.check_limit(f"register:{rate_limit.client_ip(request)}", 60, 3600)

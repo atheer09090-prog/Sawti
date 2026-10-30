@@ -1,5 +1,5 @@
 // client/src/lib/api.ts
-// ربط منصة صوتي قلمي بالـ Backend
+// ربط برنامج صوتي قلمي بالـ Backend
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000/api";
 

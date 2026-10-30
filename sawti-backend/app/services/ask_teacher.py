@@ -7,12 +7,13 @@
 import os
 import json
 import logging
+import time
 import urllib.request
 import urllib.error
 
 logger = logging.getLogger("ask_teacher")
 
-MAX_QUESTION_LEN = 300
+MAX_QUESTION_LEN = 500
 
 # علامات نهاية الجملة العربية والعامة المستخدمة لقصّ أي رد مقطوع
 _SENTENCE_ENDERS = ("۔", "؟", "!", ".", "،؟", ":")
@@ -31,6 +32,19 @@ def _trim_to_last_complete_sentence(text: str) -> str:
 
 class TeacherUnavailable(Exception):
     """المعلم الذكي (Gemini) غير متاح الآن — تتحول لـ 503 بدل إرجاع اعتذار كأنه إجابة."""
+
+
+def _open_with_retry(request):
+    """Retry temporary provider overload only; never turn failures into answers."""
+    for attempt in range(3):
+        try:
+            return urllib.request.urlopen(request, timeout=25)
+        except urllib.error.HTTPError as error:
+            if error.code not in (429, 500, 502, 503, 504) or attempt == 2:
+                raise
+            logger.warning("Gemini temporary HTTP %s; retry %d/2", error.code, attempt + 1)
+            error.close()
+            time.sleep(2 ** attempt)
 
 
 def answer_student_question(question: str) -> str:
@@ -94,12 +108,13 @@ def answer_student_question(question: str) -> str:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=25) as resp:
+        with _open_with_retry(req) as resp:
             data = json.loads(resp.read())
             candidate = data["candidates"][0]
             finish_reason = candidate.get("finishReason", "")
             parts = candidate.get("content", {}).get("parts", [])
-            text = parts[0]["text"].strip() if parts else ""
+            text = "\n".join(part["text"].strip() for part in parts
+                             if not part.get("thought") and isinstance(part.get("text"), str) and part["text"].strip())
 
             if finish_reason and finish_reason not in ("STOP",):
                 logger.warning("Gemini finishReason=%s for question: %s", finish_reason, question[:80])
@@ -110,7 +125,11 @@ def answer_student_question(question: str) -> str:
                 # أفضل جملة واحدة صحيحة من جملتين إحداهما مبتورة.
                 text = _trim_to_last_complete_sentence(text)
 
-            return text or "لم أتمكن من صياغة إجابة واضحة. أعد صياغة سؤالك بطريقة أخرى من فضلك."
+            if not text:
+                raise TeacherUnavailable("Provider returned no usable answer")
+            return text
+    except TeacherUnavailable:
+        raise
     except urllib.error.HTTPError as e:
         # هذا يكشف السبب الحقيقي غالبًا: مفتاح API غير صالح (403)،
         # أو تجاوز الحصة (429)، أو اسم نموذج غير موجود (404)، إلخ.
