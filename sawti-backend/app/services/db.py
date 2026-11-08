@@ -36,6 +36,24 @@ def get_conn():
     return psycopg2.connect(DATABASE_URL, sslmode="require", connect_timeout=10)
 
 
+def ping() -> bool:
+    """يتحقق من أن قاعدة البيانات تستقبل استعلامًا خفيفًا دون تعديل البيانات."""
+    if not DATABASE_URL:
+        return False
+    try:
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+            return True
+        finally:
+            conn.close()
+    except Exception:
+        logger.warning("Database health check failed", exc_info=True)
+        return False
+
+
 def ensure_table(name: str, create_sql: str):
     """
     ينشئ الجدول إن لم يكن موجودًا، مرة واحدة فقط لكل عملية تشغيل للسيرفر

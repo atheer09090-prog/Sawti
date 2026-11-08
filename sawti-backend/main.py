@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import evaluation, reports, lessons, students, auth, reviews, sus
+from app.services import db
 from app.services.security import is_production
 import logging
 import os
@@ -75,7 +76,18 @@ app.include_router(sus.router, prefix="/api/sus", tags=["استبيان SUS"])
 
 @app.get("/api/health")
 def health_check():
-    return {"status": "ok", "message": "✅ برنامج صوتي قلمي يعمل بنجاح"}
+    # UptimeRobot يزور هذا المسار دوريًا. الاستعلام الخفيف يؤكد أن الخدمات
+    # الأساسية متصلة ويُبقي مشروع Supabase المجاني نشطًا دون تعديل بيانات.
+    if db.is_configured() and not db.ping():
+        return JSONResponse(
+            {"status": "degraded", "message": "تعذّر الاتصال بقاعدة البيانات"},
+            status_code=503,
+        )
+    return {
+        "status": "ok",
+        "database": "connected" if db.is_configured() else "not_configured",
+        "message": "✅ برنامج صوتي قلمي يعمل بنجاح",
+    }
 
 
 if __name__ == "__main__":
